@@ -1,0 +1,26 @@
+# Python Virtual Environment
+.venv/
+env/
+venv/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local Memory & Logs (Keep Ada's specific memories out of version control)
+memory/*.json
+*.log
+
+# Heavy AI Models & Weights
+models/
+
+# Dynamic Media (Audio inputs/outputs)
+*.wav
+*.mp3
+
+# IDE and OS System Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
