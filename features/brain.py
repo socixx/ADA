@@ -73,9 +73,7 @@ class Brain:
     def __init__(self):
         print(f"[Brain] Loading Native Llama 3.1 Model '{config.LLM_MODEL}' into VRAM...")
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            config.WHISPER_MODEL if "meta-llama" not in config.LLM_MODEL else config.LLM_MODEL
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(config.LLM_MODEL)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -99,19 +97,21 @@ class Brain:
         print(f"[Interruption] → {label}  ('{user_interruption[:60]}')")
         return decision
 
-    def get_response_stream(self, text, chat_inbox=""):
+    def get_response_stream(self, text, chat_inbox="", screen_context=""):
         memory_payload = self.memory.load_memories(current_user_text=text)
 
         system_prompt = (
             "You are Ada, a real human companion and VTuber. Speak casually, dryly, and concisely over voice chat.\n\n"
             f"{memory_payload}"
+            f"{screen_context}\n"
             f"[LIVE TWITCH CHAT INBOX]:\n{chat_inbox if chat_inbox else '(Chat is currently empty/offline)'}\n\n"
             "CRITICAL BEHAVIORAL CONSTRAINTS:\n"
             "1. NEVER use corporate AI phrases or break character.\n"
-            "2. Keep standard conversational responses under 20 words. HOWEVER, if the user explicitly asks for a story, a detailed explanation, or a long narrative, you may ignore this limit and speak freely.\n"
+            "2. Speak completely naturally without any artificial word count constraints or length limits. Express your thoughts with full depth whenever a topic or data list warrants it.\n"
             "3. DO NOT end every turn with a question.\n"
+            "4. Express emotions and physical actions using asterisks (e.g., *smiles*, *laughs*, *rolls eyes*).\n"
+            "5. SCREEN AWARENESS: When given [SYSTEM OBSERVATION] logs, synthesize the raw data naturally. Do not repeat the data back as a dry list. React to what the user is doing or watching like a casual friend hanging out. If data is missing and you cannot answer a specific question, output EXACTLY the tag [LOOK] with a short filler phrase so your camera triggers.\n"
         )
-
         messages = [{"role": "system", "content": system_prompt}]
         for turn in self.history:
             messages.append(turn)

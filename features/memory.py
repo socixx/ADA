@@ -4,8 +4,9 @@ import os
 import threading
 import torch
 import re
+import numpy as np
 import config
-from sentence_transformers import SentenceTransformer, util
+from fastembed import TextEmbedding
 
 class MemoryManager:
     def __init__(self, tokenizer, model, model_lock):
@@ -13,8 +14,9 @@ class MemoryManager:
         self.model = model
         self.model_lock = model_lock
         
-        print("[Memory] Loading RAG Embedding Model 'all-MiniLM-L6-v2'...")
-        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        print("[Memory] Loading FastEmbed ONNX Engine ('all-MiniLM-L6-v2')...")
+        # Initialize FastEmbed instead of sentence_transformers
+        self.embedder = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
         self.timeline_embeddings = None
         
         # --- CREATE MEMORY DIRECTORY ---
@@ -48,6 +50,13 @@ class MemoryManager:
             pass
         self.user_name = "User" 
 
+    def _cosine_similarity(self, query_vec, corpus_vecs):
+        """Native numpy cosine similarity to bypass heavy dependencies."""
+        dot_product = np.dot(corpus_vecs, query_vec)
+        norm_query = np.linalg.norm(query_vec)
+        norm_corpus = np.linalg.norm(corpus_vecs, axis=1)
+        return dot_product / (norm_corpus * norm_query)
+
     def load_memories(self, current_user_text):
         self._refresh_identity() 
         memory_context = ""
@@ -77,16 +86,23 @@ class MemoryManager:
             searchable_database = archive + timeline
                 
             if searchable_database:
+                # FastEmbed returns a generator, so we convert to a numpy array
                 if self.timeline_embeddings is None or len(self.timeline_embeddings) != len(searchable_database):
-                    self.timeline_embeddings = self.embedder.encode(searchable_database, convert_to_tensor=True)
+                    embeddings = list(self.embedder.embed(searchable_database))
+                    self.timeline_embeddings = np.array(embeddings)
                 
-                query_embedding = self.embedder.encode(current_user_text, convert_to_tensor=True)
-                hits = util.semantic_search(query_embedding, self.timeline_embeddings, top_k=3)[0]
+                query_embedding = list(self.embedder.embed([current_user_text]))[0]
+                
+                # Perform native numpy semantic search
+                scores = self._cosine_similarity(query_embedding, self.timeline_embeddings)
+                
+                # Get top 3 indices sorted by score
+                top_k_indices = np.argsort(scores)[-3:][::-1]
                 
                 relevant_logs = []
-                for hit in hits:
-                    if hit['score'] >= 0.35:
-                        relevant_logs.append(searchable_database[hit['corpus_id']])
+                for idx in top_k_indices:
+                    if scores[idx] >= 0.35:
+                        relevant_logs.append(searchable_database[idx])
                 
                 if relevant_logs:
                     memory_context += "[RECALLED STREAM MEMORIES]:\n" + "\n".join(f"- {log}" for log in relevant_logs) + "\n\n"
@@ -122,7 +138,7 @@ class MemoryManager:
                 summary = self.tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True).strip()
                 
                 if summary and "NONE" not in summary.upper():
-                    print(f"[Long-Term Timeline] 📔 Consolidated: \"{summary}\"")
+                    print(f"[Long-Term Timeline] Consolidated: \"{summary}\"")
                     try:
                         with open(self.timeline_file, "r") as f:
                             timeline = json.load(f)
@@ -172,7 +188,7 @@ class MemoryManager:
                     if "USER FACT:" in clean_line:
                         fact = clean_line.split("USER FACT:")[-1].strip()
                         if fact and "NONE" not in fact.upper():
-                            print(f"[Profile Memory] 👤 Saved User Fact: \"{fact}\"")
+                            print(f"[Profile Memory] Saved User Fact: \"{fact}\"")
                             user_memories.append(fact)
                             with open(self.profile_file, "w") as f:
                                 json.dump(user_memories, f, indent=4)
@@ -181,7 +197,7 @@ class MemoryManager:
         threading.Thread(target=extraction_task, daemon=True).start()
 
     def deep_sleep_consolidation(self):
-        print("\n🌙 Initiating Deep Sleep Memory Consolidation...")
+        print("\n[Memory] Initiating Deep Sleep Memory Consolidation...")
         with self.model_lock:
             try:
                 with open(self.timeline_file, "r") as f:
@@ -190,7 +206,7 @@ class MemoryManager:
                 timeline = []
 
             if len(timeline) < 5:
-                print("💤 Not enough memories to consolidate. Ada can keep sleeping.")
+                print("[Memory] Not enough memories to consolidate. Ada can keep sleeping.")
                 return
             
             timeline_str = "\n".join(f"- {entry}" for entry in timeline)
@@ -229,6 +245,6 @@ class MemoryManager:
                     with open(self.timeline_file, "w") as f:
                         json.dump(timeline[-3:], f, indent=4)
                         
-                    print(f"✨ Consolidation Complete:\n{archive_entry}\n")
+                    print(f"[Memory] Consolidation Complete:\n{archive_entry}\n")
                 except Exception as e:
                     print(f"[Archive Write Error] {e}")

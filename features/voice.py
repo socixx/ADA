@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import config
 import tqdm as real_tqdm
+import concurrent.futures
 
 class NoOpTqdm(real_tqdm.tqdm):
     def __init__(self, *args, **kwargs):
@@ -25,39 +26,56 @@ class Voice:
         print(f"[Voice] Initializing Native {self.engine} Engine into VRAM...")
 
         self.stop_event = threading.Event()
+        
+        # Thread pool to ensure perfectly synced dual-audio playback
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
         if self.engine == "KOKORO":
             from kokoro import KPipeline
-            self.pipeline = KPipeline(lang_code=config.KOKORO_LANG, device='cuda')
+            self.pipeline = KPipeline(lang_code=config.KOKORO_LANG, repo_id='hexgrad/Kokoro-82M', device='cuda')
             self.sample_rate = 24000
             self.voice_name = config.KOKORO_VOICE
 
-            self.output_stream = sd.OutputStream(
-                samplerate=self.sample_rate, channels=1, dtype='float32'
-            )
-            self.output_stream.start()
-            print("[Voice] Persistent audio output hardware stream opened and initialized.")
+            # --- DUAL HARDWARE STREAMS ---
+            try:
+                self.vts_stream = sd.OutputStream(
+                    samplerate=self.sample_rate, channels=1, dtype='float32',
+                    device=config.VTS_CABLE_DEVICE_ID
+                )
+                self.vts_stream.start()
+                
+                self.hardware_stream = sd.OutputStream(
+                    samplerate=self.sample_rate, channels=1, dtype='float32',
+                    device=config.HARDWARE_DEVICE_ID
+                )
+                self.hardware_stream.start()
+                print(f"[Voice] Dual hardware streams opened. (VTS: {config.VTS_CABLE_DEVICE_ID}, Hardware: {config.HARDWARE_DEVICE_ID or 'Default'})")
+            except Exception as e:
+                print(f"[Voice] 🛑 Failed to open dual streams: {e}")
 
             print("[Voice] Pre-compiling and caching Kokoro graphs with startup warmup prompt...")
             try:
                 warmup_generator = self.pipeline("Warmup", voice=self.voice_name, speed=config.KOKORO_SPEED)
                 for gs, ps, audio_data_chunk in warmup_generator:
                     pass
-                print("[Voice] Kokoro warmup successful. Kernel execution graph optimized and cached.")
+                print("[Voice] Kokoro warmup successful.")
             except Exception as e:
                 print(f"[Voice] Kokoro warmup warning: {e}")
 
-        elif self.engine == "CHATTERBOX":
-            from chatterbox.tts_turbo import ChatterboxTurboTTS
-            self.model = ChatterboxTurboTTS.from_pretrained(device="cuda")
-            self.sample_rate = self.model.sr
-            print(f"[Voice] Chatterbox Turbo Engine active. Sample rate: {self.sample_rate}Hz")
+    def _safe_write(self, stream, data):
+        """Silently catches errors if a device disconnects mid-stream."""
+        try:
+            stream.write(data)
+        except Exception:
+            pass
+
+    def _dual_write(self, audio_data):
+        """Fires the audio array to both streams simultaneously to prevent desync."""
+        f1 = self.executor.submit(self._safe_write, self.vts_stream, audio_data)
+        f2 = self.executor.submit(self._safe_write, self.hardware_stream, audio_data)
+        concurrent.futures.wait([f1, f2])
 
     def stop_with_fade(self, audio_queue):
-        """
-        Signals the audio worker to gracefully trail off. 
-        We no longer write to the stream here to avoid thread race conditions.
-        """
         print("[Voice] 🛑 Interruption: Trailing off audio naturally...")
         self.stop_event.set()
 
@@ -105,74 +123,52 @@ class Voice:
                 if audio_data.ndim == 1:
                     audio_data = audio_data.reshape(-1, 1)
 
-                # --- NEW: Syllable-Aware Exponential Trail-Off ---
-                block_size = int(self.sample_rate * 0.1) # 100ms blocks
+                block_size = int(self.sample_rate * 0.1) 
                 
                 for i in range(0, len(audio_data), block_size):
                     if self.stop_event.is_set():
-                        # Grab the next 500ms of audio to analyze for a syllable break
                         trail_samples = int(self.sample_rate * 0.5) 
                         remaining = audio_data[i : i + trail_samples]
                         
                         if len(remaining) > 0:
-                            # 1. Envelope Detection: Find a natural dip in amplitude
                             abs_audio = np.abs(remaining).flatten()
-                            window = int(self.sample_rate * 0.015) # 15ms scanning window
+                            window = int(self.sample_rate * 0.015) 
                             break_point = len(remaining)
                             
-                            # Scan forward to find where the audio energy drops near zero
                             for j in range(0, len(abs_audio) - window, int(window/2)):
                                 rms = np.mean(abs_audio[j : j + window])
-                                if rms < 0.015: # Acoustic trough threshold
+                                if rms < 0.015: 
                                     break_point = j + int(window/2)
                                     break
                             
-                            # 2. Play up to the break point at normal volume
                             syllable_finish = remaining[:break_point]
-                            self.output_stream.write(syllable_finish)
+                            self._dual_write(syllable_finish)
                             
-                            # 3. Apply an exponential fade to a short tail to kill any pop/click
-                            tail_len = min(int(self.sample_rate * 0.05), len(remaining) - break_point) # 50ms tail
+                            tail_len = min(int(self.sample_rate * 0.05), len(remaining) - break_point)
                             if tail_len > 0:
                                 tail = remaining[break_point : break_point + tail_len]
-                                # Quadratic decay (**2) sounds much more natural than linear
                                 fade = (np.linspace(1.0, 0.0, tail_len, dtype=np.float32) ** 2).reshape(-1, 1)
-                                self.output_stream.write(tail * fade)
+                                self._dual_write(tail * fade)
                         
-                        break # Break out of the block loop
+                        break 
                     
                     end_idx = min(i + block_size, len(audio_data))
-                    self.output_stream.write(audio_data[i : end_idx])
+                    self._dual_write(audio_data[i : end_idx])
 
                 if self.stop_event.is_set():
-                    break # Break out of the Kokoro generator loop entirely
-
-            return None, self.sample_rate, ttfa
-
-        elif self.engine == "CHATTERBOX":
-            with torch.inference_mode():
-                full_wav = self.model.generate(clean_text)
-
-            ttfa = time.perf_counter() - start_t
-
-            if isinstance(full_wav, torch.Tensor):
-                audio_data = full_wav.squeeze().cpu().numpy()
-            else:
-                audio_data = np.asarray(full_wav)
-
-            if audio_data.size > 0 and not self.stop_event.is_set():
-                if audio_data.ndim == 1:
-                    audio_data = audio_data.reshape(-1, 1)
-
-                with sd.OutputStream(samplerate=self.sample_rate, channels=1, dtype='float32') as stream:
-                    stream.write(audio_data.astype('float32'))
+                    break 
 
             return None, self.sample_rate, ttfa
 
     def __del__(self):
-        if hasattr(self, 'output_stream'):
-            try:
-                self.output_stream.stop()
-                self.output_stream.close()
-            except Exception:
-                pass
+        try:
+            if hasattr(self, 'vts_stream'):
+                self.vts_stream.stop()
+                self.vts_stream.close()
+            if hasattr(self, 'hardware_stream'):
+                self.hardware_stream.stop()
+                self.hardware_stream.close()
+            if hasattr(self, 'executor'):
+                self.executor.shutdown(wait=False)
+        except Exception:
+            pass

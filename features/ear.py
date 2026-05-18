@@ -173,14 +173,14 @@ class Ear:
                                 complete_prob = torch.sigmoid(logits).squeeze().item()
                             
                             if complete_prob >= self.turn_threshold:
-                                print(f"  └─ ⚡ Turn Complete (Conf: {complete_prob:.2f})")
+                                print(f"  └─ Turn Complete (Conf: {complete_prob:.2f})")
                                 break
                             else:
-                                print(f"  └─ 🤔 Continuing thought (Conf: {complete_prob:.2f}). Waiting...")
+                                print(f"  └─ Continuing thought (Conf: {complete_prob:.2f}). Waiting...")
                         
                         # --- HARD FALLBACK ---
                         if silence_duration > self.hard_fallback_timeout:
-                            print(f"[VAD] 🛑 Hard Fallback Triggered ({self.hard_fallback_timeout}s of dead air)")
+                            print(f"[VAD] Hard Fallback Triggered ({self.hard_fallback_timeout}s of dead air)")
                             break
                             
                     # IF THE USER IS ACTIVELY SPEAKING
