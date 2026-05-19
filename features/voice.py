@@ -21,13 +21,25 @@ except Exception:
 
 
 class Voice:
+    def _get_device_id(self, target_name):
+        """Scans Windows audio devices and returns the ID of a matching name."""
+        if not target_name:
+            return None
+        try:
+            devices = sd.query_devices()
+            for i, dev in enumerate(devices):
+                # Look for the name and ensure it's actually an output device
+                if target_name.lower() in dev['name'].lower() and dev['max_output_channels'] > 0:
+                    return i
+        except Exception as e:
+            print(f"[Voice] Audio device scan failed: {e}")
+        return None
+
     def __init__(self):
         self.engine = config.ACTIVE_TTS
         print(f"[Voice] Initializing Native {self.engine} Engine into VRAM...")
 
         self.stop_event = threading.Event()
-        
-        # Thread pool to ensure perfectly synced dual-audio playback
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
         if self.engine == "KOKORO":
@@ -36,31 +48,42 @@ class Voice:
             self.sample_rate = 24000
             self.voice_name = config.KOKORO_VOICE
 
-            # --- DUAL HARDWARE STREAMS ---
+            vts_id = self._get_device_id(config.VTS_CABLE_DEVICE_NAME)
+            hw_id = self._get_device_id(config.HARDWARE_DEVICE_NAME)
+
+            self.vts_stream = None
+            self.hardware_stream = None
+
+            # --- VTS STREAM (ISOLATED) ---
             try:
-                self.vts_stream = sd.OutputStream(
-                    samplerate=self.sample_rate, channels=1, dtype='float32',
-                    device=config.VTS_CABLE_DEVICE_ID
-                )
-                self.vts_stream.start()
-                
+                if vts_id is not None:
+                    self.vts_stream = sd.OutputStream(
+                        samplerate=self.sample_rate, channels=1, dtype='float32', device=vts_id
+                    )
+                    self.vts_stream.start()
+                    print(f"[Voice] VTS Stream bound to: '{config.VTS_CABLE_DEVICE_NAME}' (ID: {vts_id})")
+                else:
+                    print(f"[Voice] ⚠️ Could not find audio cable matching '{config.VTS_CABLE_DEVICE_NAME}'")
+            except Exception as e:
+                print(f"[Voice] 🛑 VTS Stream blocked by Windows: {e}")
+
+            # --- HARDWARE STREAM / HEADPHONES (ISOLATED) ---
+            try:
                 self.hardware_stream = sd.OutputStream(
-                    samplerate=self.sample_rate, channels=1, dtype='float32',
-                    device=config.HARDWARE_DEVICE_ID
+                    samplerate=self.sample_rate, channels=1, dtype='float32', device=hw_id
                 )
                 self.hardware_stream.start()
-                print(f"[Voice] Dual hardware streams opened. (VTS: {config.VTS_CABLE_DEVICE_ID}, Hardware: {config.HARDWARE_DEVICE_ID or 'Default'})")
+                print(f"[Voice] Hardware Stream bound to: Default/Ears")
             except Exception as e:
-                print(f"[Voice] 🛑 Failed to open dual streams: {e}")
+                print(f"[Voice] 🛑 Hardware Stream failure: {e}")
 
             print("[Voice] Pre-compiling and caching Kokoro graphs with startup warmup prompt...")
             try:
-                warmup_generator = self.pipeline("Warmup", voice=self.voice_name, speed=config.KOKORO_SPEED)
-                for gs, ps, audio_data_chunk in warmup_generator:
+                for _ in self.pipeline("Warmup", voice=self.voice_name, speed=config.KOKORO_SPEED):
                     pass
                 print("[Voice] Kokoro warmup successful.")
             except Exception as e:
-                print(f"[Voice] Kokoro warmup warning: {e}")
+                pass
 
     def _safe_write(self, stream, data):
         """Silently catches errors if a device disconnects mid-stream."""
@@ -70,10 +93,16 @@ class Voice:
             pass
 
     def _dual_write(self, audio_data):
-        """Fires the audio array to both streams simultaneously to prevent desync."""
-        f1 = self.executor.submit(self._safe_write, self.vts_stream, audio_data)
-        f2 = self.executor.submit(self._safe_write, self.hardware_stream, audio_data)
-        concurrent.futures.wait([f1, f2])
+        """Fires the audio array to both streams simultaneously. Fails gracefully if streams are dead."""
+        futures = []
+        if hasattr(self, 'vts_stream') and self.vts_stream is not None:
+            futures.append(self.executor.submit(self._safe_write, self.vts_stream, audio_data))
+            
+        if hasattr(self, 'hardware_stream') and self.hardware_stream is not None:
+            futures.append(self.executor.submit(self._safe_write, self.hardware_stream, audio_data))
+            
+        if futures:
+            concurrent.futures.wait(futures)
 
     def stop_with_fade(self, audio_queue):
         print("[Voice] 🛑 Interruption: Trailing off audio naturally...")
@@ -142,7 +171,8 @@ class Voice:
                                     break
                             
                             syllable_finish = remaining[:break_point]
-                            self._dual_write(syllable_finish)
+                            syllable_48k = np.repeat(syllable_finish, 2) # Upsample to 48kHz
+                            self._dual_write(syllable_48k)
                             
                             tail_len = min(int(self.sample_rate * 0.05), len(remaining) - break_point)
                             if tail_len > 0:

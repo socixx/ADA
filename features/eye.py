@@ -1,68 +1,54 @@
 import mss
-import torch
+import io
+import base64
 from PIL import Image
-from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
-from qwen_vl_utils import process_vision_info
+from openai import OpenAI
+import config
 
 class Eye:
     def __init__(self):
-        print("[Eye] Loading Qwen2-VL-2B Vision Scribe into VRAM...")
-        model_id = "Qwen/Qwen2-VL-2B-Instruct" # Reverted to 2B for Fish Audio VRAM buffer
-        
-        self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_id, 
-            torch_dtype=torch.bfloat16, 
-            device_map="cuda",
-            attn_implementation="sdpa" 
-        )
-        self.processor = AutoProcessor.from_pretrained(model_id)
+        print("[Eye] Connecting to local vLLM Vision Node (Port 8005)...")
+        # Lightweight network node interface -> Uses 0MB of local Windows VRAM
+        self.client = OpenAI(base_url=f"http://localhost:{config.VISION_PORT}/v1", api_key="token")
         self.sct = mss.mss()
 
-    def look_at_screen(self, user_question="Act as an OCR script. Scan the entire screen layout. Extract and list all visible text blocks, open window titles, terminal commands, active video metadata, channel names, subscriber metrics, and chat logs. Provide a raw data dump."):
+    def look_at_screen(self, user_question="Scan the entire screen layout. Extract and list all visible text blocks, window titles, open applications, terminal outputs, active video metadata, and chat logs in full detail."):
+        """Captures framebuffers and offloads dense visual analysis to the vLLM container."""
         try:
             print("[Eye] Snapping screenshot...")
             monitor = self.sct.monitors[1]
             sct_img = self.sct.grab(monitor)
             img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
             
-            # Keep it crisp at 1280x1280 so 2B can read tiny numbers/text labels cleanly
+            # FULL RENDER DENSITY: Maintained layout sharpness for crisp text comprehension
             img.thumbnail((1280, 1280))
             
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image", 
-                            "image": img,
-                            # Stripped max_pixels. The model now receives the raw high-fidelity grid.
-                        },
-                        {"type": "text", "text": user_question},
-                    ],
-                }
-            ]
+            # Encode raw binary frame details into standard base64 strings
+            buffered = io.BytesIO()
+            img.save(buffered, format="JPEG")
+            img_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            image_url = f"data:image/jpeg;base64,{img_base64}"
             
-            text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            image_inputs, video_inputs = process_vision_info(messages)
+            # Post directly to the dedicated vLLM visual attention matrix
+            response = self.client.chat.completions.create(
+                model="Qwen/Qwen2-VL-2B-Instruct",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_question},
+                            {
+                                "type": "image_url", 
+                                "image_url": {"url": image_url}
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=300,
+                temperature=0.2
+            )
             
-            inputs = self.processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            ).to("cuda")
-
-            with torch.inference_mode():
-                generated_ids = self.model.generate(**inputs, max_new_tokens=200)
-                
-            generated_ids_trimmed = [
-                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
-            output_text = self.processor.batch_decode(
-                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-            )[0]
-            
+            output_text = response.choices[0].message.content
             print(f"[Eye] Vision Output: '{output_text.strip()}'")
             return output_text.strip()
             

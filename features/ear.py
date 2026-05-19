@@ -22,7 +22,7 @@ _Wav2Vec2ForEndpointing.__init__ = patched_init
 class Ear:
     def __init__(self):
         print(f"Loading Whisper Model '{config.WHISPER_MODEL}' on CUDA...")
-        self.model = WhisperModel(config.WHISPER_MODEL, device="cuda", compute_type="float16")
+        self.model = WhisperModel(config.WHISPER_MODEL, device="cuda", compute_type="int8_float16")
         self.sample_rate = 16000
         self.channels = 1
         

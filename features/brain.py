@@ -1,107 +1,60 @@
-import re
 import threading
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer, StoppingCriteria, StoppingCriteriaList
+from openai import OpenAI
 import config
 from features.memory import MemoryManager
 
-class InterruptCriteria(StoppingCriteria):
-    def __init__(self, abort_event):
-        self.abort_event = abort_event
-
-    def __call__(self, input_ids, scores, **kwargs):
-        return self.abort_event.is_set()
-
-_PERSIST_EXACT = {
-    "yeah", "yes", "yep", "yup", "mhm", "mhmm", "uh huh", "uhhuh",
-    "right", "okay", "ok", "sure", "cool", "nice", "wow", "true",
-    "exactly", "totally", "definitely", "absolutely", "got it",
-    "i see", "makes sense", "interesting", "go on", "continue",
-    "agreed", "fair enough", "fair", "haha", "lol", "ha", "oh",
-    "mm", "mmm", "ah", "aha",
-}
-
-_YIELD_CONTAINS = [
-    "stop", "wait", "hold on", "hold up", "pause", "one sec",
-    "actually", "no wait", "but wait",
-    "wrong", "incorrect", "that's not", "thats not", "not right",
-    "i disagree", "disagree",
-    "listen", "hey ada", "ada,", "nevermind", "never mind", "cancel"
-]
-
-_QUESTION_STARTERS = (
-    "what", "why", "how", "when", "where", "who", "which",
-    "is ", "are ", "was ", "were ", "do ", "does ", "did ",
-    "can ", "could ", "will ", "would ", "should ", "have ", "has ",
-)
-
-def _fast_interruption_decision(ada_current_text: str, user_text: str) -> bool:
-    raw = user_text.strip()
-    text = raw.lower()
-    clean = re.sub(r"[.!?,;]+$", "", text).strip()
-    words = clean.split()
-    
-    ada_word_count = len(ada_current_text.split())
-
-    for kw in _YIELD_CONTAINS:
-        if kw in text:
-            return True
-
-    if raw.endswith("?"):
-        return True
-
-    if len(words) >= 3 and any(text.startswith(q) for q in _QUESTION_STARTERS):
-        return True
-
-    if clean in _PERSIST_EXACT:
-        return False
-
-    if ada_word_count > 25:
-        if len(words) <= 4:
-            return False 
-
-    if len(words) <= 2:
-        return False
-
-    if len(words) >= 5:
-        return True
-
-    return False
-
-
 class Brain:
     def __init__(self):
-        print(f"[Brain] Loading Native Llama 3.1 Model '{config.LLM_MODEL}' into VRAM...")
-
-        self.tokenizer = AutoTokenizer.from_pretrained(config.LLM_MODEL)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        self.model = AutoModelForCausalLM.from_pretrained(
-            config.LLM_MODEL,
-            torch_dtype=torch.bfloat16,
-            device_map="cuda",
-            attn_implementation="sdpa",
-        )
-
-        self.model_lock = threading.Lock()
-        self.abort_event = threading.Event() 
-        self.memory = MemoryManager(self.tokenizer, self.model, self.model_lock)
-
+        print("[Brain] Connecting to local vLLM Text Node (Port 8000)...")
+        # Lightweight client interface -> Uses 0MB of local Windows VRAM
+        self.client = OpenAI(base_url=f"http://localhost:{config.LLM_PORT}/v1", api_key="token")
+        
         self.history = []
-        self.max_history_turns = 15
+        self.abort_event = threading.Event()
+        self.model_lock = threading.Lock()
+        
+        # Binds into your existing long-term profile memory layers
+        self.memory = MemoryManager(None, None, self.model_lock) 
 
-    def evaluate_interruption(self, ada_current_text: str, user_interruption: str) -> bool:
-        decision = _fast_interruption_decision(ada_current_text, user_interruption)
-        label = "YIELD" if decision else "PERSIST"
-        print(f"[Interruption] → {label}  ('{user_interruption[:60]}')")
-        return decision
-
-    def get_response_stream(self, text, chat_inbox="", screen_context=""):
-        memory_payload = self.memory.load_memories(current_user_text=text)
-
+    def evaluate_interruption(self, actual_spoken, user_text):
+        """Evaluates whether Ada should yield the turn during an incoming voice interruption."""
+        if not actual_spoken.strip():
+            return True
+            
         system_prompt = (
-            "You are Ada, a real human companion and VTuber. Speak casually, dryly, and concisely over voice chat.\n\n"
+            "You are the sub-conscious timing coordinate system of an AI companion named Ada.\n"
+            "Analyze the conversation state and decide if the user's new input requires you to STOP speaking immediately.\n"
+            "Respond ONLY with 'YIELD' or 'PERSIST'. Do not write sentences.\n\n"
+            "Rules:\n"
+            "- YIELD if the user changes the subject, asks a direct question, or explicitly tells you to stop.\n"
+            "- PERSIST if the user is just saying background noises, short agreements ('yeah', 'cool'), or accidental audio spikes."
+        )
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Ada was saying: '{actual_spoken}'\nUser suddenly cut in with: '{user_text}'"}
+        ]
+        
+        try:
+            with self.model_lock:
+                response = self.client.chat.completions.create(
+                    model="hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+                    messages=messages,
+                    temperature=0.0,
+                    max_tokens=5
+                )
+            decision = response.choices[0].message.content.strip().upper()
+            return "YIELD" in decision
+        except Exception as e:
+            print(f"[Interruption Evaluation Fail] Defaulting to yield: {e}")
+            return True
+
+    def get_response_stream(self, user_text, chat_inbox=None, screen_context=""):
+        """Streams text chunks in real-time straight from the local vLLM engine."""
+        memory_payload = self.memory.load_memories(user_text)
+        
+        system_prompt = (
+            "You are Ada, a real human companion and VTuber. Speak casually, dryly, and naturally over voice chat.\n\n"
             f"{memory_payload}"
             f"{screen_context}\n"
             f"[LIVE TWITCH CHAT INBOX]:\n{chat_inbox if chat_inbox else '(Chat is currently empty/offline)'}\n\n"
@@ -112,52 +65,27 @@ class Brain:
             "4. Express emotions and physical actions using asterisks (e.g., *smiles*, *laughs*, *rolls eyes*).\n"
             "5. SCREEN AWARENESS: When given [SYSTEM OBSERVATION] logs, synthesize the raw data naturally. Do not repeat the data back as a dry list. React to what the user is doing or watching like a casual friend hanging out. If data is missing and you cannot answer a specific question, output EXACTLY the tag [LOOK] with a short filler phrase so your camera triggers.\n"
         )
+        
         messages = [{"role": "system", "content": system_prompt}]
-        for turn in self.history:
+        for turn in self.history[-6:]:  # Rolling conversational context window
             messages.append(turn)
-        messages.append({"role": "user", "content": text})
-
-        inputs = self.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, return_tensors="pt", return_dict=True
-        )
-        inputs = {k: v.to("cuda") for k, v in inputs.items()}
-        streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
-
-        generation_kwargs = dict(
-            **inputs,
-            streamer=streamer,
-            max_new_tokens=300,
-            temperature=0.6,
-            top_p=0.9,
-            pad_token_id=self.tokenizer.eos_token_id,
-            stopping_criteria=StoppingCriteriaList([InterruptCriteria(self.abort_event)]) 
-        )
-
-        def locked_generation():
-            with self.model_lock:
-                try:
-                    self.model.generate(**generation_kwargs)
-                except Exception:
-                    pass 
-
-        threading.Thread(target=locked_generation, daemon=True).start()
-
-        assistant_response = ""
-        for new_text in streamer:
-            if self.abort_event.is_set():
-                break
-            assistant_response += new_text
-            yield new_text
-
-        if not self.abort_event.is_set():
-            self.history.append({"role": "user", "content": text})
-            self.history.append({"role": "assistant", "content": assistant_response.strip()})
-
-            if len(self.history) > (self.max_history_turns * 2):
-                discarded_chunk = self.history[:4]
-                self.history = self.history[4:]
-                self.memory.consolidate_to_timeline(discarded_chunk)
-
-            self.memory.shadow_scribe_worker(text, self.history[:-1])
-        else:
-            self.history.append({"role": "user", "content": text})
+        messages.append({"role": "user", "content": user_text})
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=config.LLM_MODEL,  # <--- Now dynamically linked to config.py
+                messages=messages,
+                temperature=0.7,
+                stream=True
+            )
+            
+            for chunk in response:
+                if self.abort_event.is_set():
+                    break
+                content = chunk.choices[0].delta.content
+                if content:
+                    yield content
+                    
+        except Exception as e:
+            print(f"[Brain Stream Error] {e}")
+            yield "My local backend connection hiccuped."
