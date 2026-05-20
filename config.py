@@ -8,7 +8,9 @@ CHUNK_SIZE = 1024
 VAD_THRESHOLD = 0.025       
 
 # --- PIPECAT SEMANTIC VAD SETTINGS ---
-SEMANTIC_VAD_MODEL = "pipecat-ai/smart-turn-v2"
+HF_VAD_REPO = "pipecat-ai/smart-turn-v3"
+VAD_MODEL_FILE = "smart-turn-v3.2-gpu.onnx"
+
 SEMANTIC_TURN_THRESHOLD = 0.65  # Confidence (0.0 to 1.0) required to trigger a cutoff
 SILENCE_TIMEOUT = 1.5          # Hard fallback limit if Pipecat fails or you walk away
 

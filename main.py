@@ -40,12 +40,15 @@ ada_state = {"is_speaking": False, "last_generation": "", "spoken_text": ""}
 def shutdown_containers():
     """Cleanly stops the background Docker nodes to free VRAM."""
     if getattr(config, "LAUNCH_VLLM_CONTAINERS", False):
-        print("\n[System] Shutting down backend nodes...")
-        subprocess.run(
-            ["docker", "stop", config.LLM_CONTAINER_NAME, config.VISION_CONTAINER_NAME], 
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        print("\n[System] Instructing Docker to terminate backend nodes...")
+        # FIRE AND FORGET: Use Popen instead of run so Docker doesn't hang the Python thread
+        # We also pass "-t 1" to force Docker to kill the containers quickly
+        subprocess.Popen(
+            ["docker", "stop", "-t", "1", config.LLM_CONTAINER_NAME, config.VISION_CONTAINER_NAME], 
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         )
-        print("[System] VRAM successfully released.")
+        print("[System] VRAM release initiated.")
 
 def ensure_local_models():
     """Autonomously verifies and downloads GGUF models from Hugging Face if missing."""

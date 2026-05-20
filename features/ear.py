@@ -1,23 +1,15 @@
+import os
 import time
 import threading
 import numpy as np
 import sounddevice as sd
 import torch
 from faster_whisper import WhisperModel
-from transformers import Wav2Vec2Processor
-from pipecat.audio.turn.smart_turn.local_smart_turn_v2 import _Wav2Vec2ForEndpointing
-import config
+import onnxruntime as ort
+from huggingface_hub import hf_hub_download
+from transformers import WhisperFeatureExtractor
 from collections import deque
-
-# ==============================================================================
-# --- HOTFIX FOR TRANSFORMERS 4.40+ COMPATIBILITY ---
-orig_init = _Wav2Vec2ForEndpointing.__init__
-def patched_init(self, *args, **kwargs):
-    orig_init(self, *args, **kwargs)
-    if not hasattr(self, 'all_tied_weights_keys'):
-        self.all_tied_weights_keys = {}  
-_Wav2Vec2ForEndpointing.__init__ = patched_init
-# ==============================================================================
+import config
 
 class Ear:
     def __init__(self):
@@ -36,11 +28,39 @@ class Ear:
         )
         self.vad_model = self.vad_model.to("cuda")
         
-        # 2. THE CUTOFF GATE: Pipecat Smart Turn V2
-        print(f"[Ear] Loading Semantic Turn VAD '{config.SEMANTIC_VAD_MODEL}' (Cutoff Gate)...")
-        self.turn_processor = Wav2Vec2Processor.from_pretrained(config.SEMANTIC_VAD_MODEL)
-        self.turn_classifier = _Wav2Vec2ForEndpointing.from_pretrained(config.SEMANTIC_VAD_MODEL).to("cuda")
-        self.turn_classifier.eval() 
+        # 2. THE CUTOFF GATE: Pipecat Smart Turn V3 (ONNX GPU)
+        vad_filename = getattr(config, "VAD_MODEL_FILE", "smart-turn-v3.2-gpu.onnx")
+        hf_vad_repo = getattr(config, "HF_VAD_REPO", "pipecat-ai/smart-turn-v3")
+        vad_model_path = os.path.join(config.LOCAL_MODELS_DIR, vad_filename)
+
+        if not os.path.exists(vad_model_path):
+            print(f"\n[Ear] Local VAD model '{vad_filename}' not found in models directory.")
+            print(f"[Ear] Initiating secure pull from HuggingFace Hub ({hf_vad_repo})...")
+            try:
+                hf_hub_download(
+                    repo_id=hf_vad_repo,
+                    filename=vad_filename,
+                    local_dir=config.LOCAL_MODELS_DIR,
+                    local_dir_use_symlinks=False
+                )
+                print("[Ear] ✅ VAD model successfully acquired.\n")
+            except Exception as e:
+                print(f"[Ear] FATAL: Failed to download VAD model: {e}")
+                os._exit(1)
+
+        print(f"[Ear] Loading Semantic Turn VAD (Cutoff Gate) via ONNX...")
+        options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        
+        self.turn_session = ort.InferenceSession(
+            vad_model_path, 
+            sess_options=options,
+            providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+        )
+        self.turn_input_name = self.turn_session.get_inputs()[0].name
+        
+        # Load the Whisper Feature Extractor to generate Mel Spectrograms
+        self.turn_processor = WhisperFeatureExtractor.from_pretrained("openai/whisper-tiny")
         
         self.speech_start_threshold = 0.55  
         self.speech_end_threshold = 0.45    
@@ -59,11 +79,10 @@ class Ear:
             "recording_active": True,
             "last_speech_frame_idx": 0,
             "physical_silence_start_time": 0.0,
-            "last_pipecat_poll_time": 0.0 # Replaces the lockout flag
+            "last_pipecat_poll_time": 0.0 
         }
         
         consecutive_silence_samples = 0
-        hard_silence_counter = 0
         lock = threading.Lock()
         
         def bg_transcribe_worker():
@@ -119,7 +138,6 @@ class Ear:
                 with torch.inference_mode():
                     speech_prob = self.vad_model(tensor_chunk, self.sample_rate).item()
                 
-                # --- PHASE 1: WAITING FOR SPEECH ---
                 if not state["speech_started"]:
                     pre_roll_buffer.extend(audio_chunk_flattened)
                     
@@ -134,43 +152,43 @@ class Ear:
                             state["last_speech_frame_idx"] = len(audio_buffer)
                             state["physical_silence_start_time"] = time.perf_counter()
                             
-                # --- PHASE 2: ACTIVE LISTENING ---
                 else:
                     audio_buffer.extend(audio_chunk_flattened)
                     
-                    # IF THE USER STOPS MAKING SOUND (Silero goes below 0.45)
                     if speech_prob < self.speech_end_threshold:
                         consecutive_silence_samples += len(audio_chunk_flattened)
                         silence_duration = consecutive_silence_samples / self.sample_rate
                         
-                        # CONTINUOUS POLLING: Check Pipecat every 150ms after the initial 300ms pause
                         current_time = time.perf_counter()
                         if silence_duration >= 0.3 and (current_time - state["last_pipecat_poll_time"] >= 0.15):
                             state["last_pipecat_poll_time"] = current_time
-                            print(f"\n[VAD] ⏳ {int(silence_duration * 1000)}ms acoustic pause. Asking Pipecat...")
+                            print(f"\n[VAD] ⏳ {int(silence_duration * 1000)}ms acoustic pause. Asking Smart Turn...")
                             
                             audio_snapshot = np.array(audio_buffer, dtype=np.float32).flatten()
-                            if len(audio_snapshot) > 8 * self.sample_rate:
-                                audio_snapshot = audio_snapshot[-8 * self.sample_rate:]
+                            
+                            max_samples = 8 * self.sample_rate 
+                            if len(audio_snapshot) > max_samples:
+                                audio_snapshot = audio_snapshot[-max_samples:]
+                            elif len(audio_snapshot) < max_samples:
+                                pad_len = max_samples - len(audio_snapshot)
+                                audio_snapshot = np.pad(audio_snapshot, (pad_len, 0), mode='constant')
                                 
-                            inputs = self.turn_processor(
+                            # Convert raw audio into a Log-Mel Spectrogram
+                            mel_features = self.turn_processor(
                                 audio_snapshot, 
                                 sampling_rate=self.sample_rate, 
-                                return_tensors="pt",
-                                return_attention_mask=True  
-                            )
-                            inputs = {k: v.to("cuda") for k, v in inputs.items()}
+                                return_tensors="np"
+                            ).input_features
                             
-                            with torch.inference_mode():
-                                outputs = self.turn_classifier(**inputs)
-                                if isinstance(outputs, dict):
-                                    logits = outputs["logits"]
-                                elif hasattr(outputs, "logits"):
-                                    logits = outputs.logits
-                                else:
-                                    logits = outputs[0]
-                                    
-                                complete_prob = torch.sigmoid(logits).squeeze().item()
+                            # Whisper pads to 3000 frames by default. V3 strictly expects 800 frames.
+                            mel_spectrogram = mel_features[:, :, :800]
+                            
+                            ort_inputs = {
+                                self.turn_input_name: mel_spectrogram
+                            }
+                            
+                            logits = self.turn_session.run(None, ort_inputs)[0]
+                            complete_prob = 1.0 / (1.0 + np.exp(-float(np.squeeze(logits))))
                             
                             if complete_prob >= self.turn_threshold:
                                 print(f"  └─ Turn Complete (Conf: {complete_prob:.2f})")
@@ -178,20 +196,16 @@ class Ear:
                             else:
                                 print(f"  └─ Continuing thought (Conf: {complete_prob:.2f}). Waiting...")
                         
-                        # --- HARD FALLBACK ---
                         if silence_duration > self.hard_fallback_timeout:
                             print(f"[VAD] Hard Fallback Triggered ({self.hard_fallback_timeout}s of dead air)")
                             break
                             
-                    # IF THE USER IS ACTIVELY SPEAKING
                     else:
                         consecutive_silence_samples = 0
-                        
                         with lock:
                             state["last_speech_frame_idx"] = len(audio_buffer)
                             state["physical_silence_start_time"] = time.perf_counter()
         
-        # --- CLEANUP & RETURN ---
         start_compute_t = time.perf_counter()
         with lock:
             state["recording_active"] = False
@@ -204,4 +218,3 @@ class Ear:
             
         whisper_time = time.perf_counter() - start_compute_t
         return final_text, whisper_time, silence_start_ts
-    

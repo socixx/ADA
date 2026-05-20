@@ -18,8 +18,18 @@ class Brain:
 
     def evaluate_interruption(self, actual_spoken, user_text):
         """Evaluates whether Ada should yield the turn during an incoming voice interruption."""
+        # Strip punctuation for cleaner exact-word matching
+        clean_user = user_text.lower().replace(".", "").replace(",", "").replace("!", "").strip()
+        
+        # 1. HARD GATE: Ignore tiny fragments, but explicitly allow short interrupt commands
+        interrupt_words = ["stop", "wait", "cancel", "shh", "nevermind", "never mind", "hold on", "pause", "shut up", "enough"]
+        
+        if len(clean_user.split()) <= 2 and not any(w in clean_user for w in interrupt_words):
+            return False
+
+        # 2. CATCH EARLY INTERRUPTS: If she hasn't made a sound yet, give the LLM context
         if not actual_spoken.strip():
-            return True
+            actual_spoken = "(Ada had not started speaking yet, but was about to)"
             
         system_prompt = (
             "You are the sub-conscious timing coordinate system of an AI companion named Ada.\n"
@@ -46,8 +56,8 @@ class Brain:
             decision = response.choices[0].message.content.strip().upper()
             return "YIELD" in decision
         except Exception as e:
-            print(f"[Interruption Evaluation Fail] Defaulting to yield: {e}")
-            return True
+            print(f"[Interruption Evaluation Fail] Defaulting to persist: {e}")
+            return False # Default to persisting if the local LLM errors out
 
     def get_response_stream(self, user_text, chat_inbox=None, screen_context=""):
         """Streams text chunks in real-time straight from the local vLLM engine."""

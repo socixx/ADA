@@ -58,7 +58,7 @@ class Voice:
             try:
                 if vts_id is not None:
                     self.vts_stream = sd.OutputStream(
-                        samplerate=self.sample_rate, channels=1, dtype='float32', device=vts_id
+                        samplerate=48000, channels=2, dtype='int16', device=vts_id
                     )
                     self.vts_stream.start()
                     print(f"[Voice] VTS Stream bound to: '{config.VTS_CABLE_DEVICE_NAME}' (ID: {vts_id})")
@@ -70,7 +70,7 @@ class Voice:
             # --- HARDWARE STREAM / HEADPHONES (ISOLATED) ---
             try:
                 self.hardware_stream = sd.OutputStream(
-                    samplerate=self.sample_rate, channels=1, dtype='float32', device=hw_id
+                    samplerate=48000, channels=2, dtype='int16', device=hw_id
                 )
                 self.hardware_stream.start()
                 print(f"[Voice] Hardware Stream bound to: Default/Ears")
@@ -94,12 +94,21 @@ class Voice:
 
     def _dual_write(self, audio_data):
         """Fires the audio array to both streams simultaneously. Fails gracefully if streams are dead."""
+        if audio_data.ndim == 1:
+            audio_data = audio_data.reshape(-1, 1)
+            
+        audio_data_48k = np.repeat(audio_data, 2, axis=0)
+        stereo_data = np.concatenate((audio_data_48k, audio_data_48k), axis=1)
+
+        # Convert float32 (-1.0 to 1.0) into PCM int16 (-32768 to 32767) to satisfy Windows Drivers
+        stereo_data_int16 = np.clip(stereo_data * 32767, -32768, 32767).astype(np.int16)
+
         futures = []
         if hasattr(self, 'vts_stream') and self.vts_stream is not None:
-            futures.append(self.executor.submit(self._safe_write, self.vts_stream, audio_data))
+            futures.append(self.executor.submit(self._safe_write, self.vts_stream, stereo_data_int16))
             
         if hasattr(self, 'hardware_stream') and self.hardware_stream is not None:
-            futures.append(self.executor.submit(self._safe_write, self.hardware_stream, audio_data))
+            futures.append(self.executor.submit(self._safe_write, self.hardware_stream, stereo_data_int16))
             
         if futures:
             concurrent.futures.wait(futures)
@@ -107,6 +116,14 @@ class Voice:
     def stop_with_fade(self, audio_queue):
         print("[Voice] 🛑 Interruption: Trailing off audio naturally...")
         self.stop_event.set()
+
+        # CRITICAL FIX: Properly drain the queue. Using .clear() causes .join() deadlocks!
+        while not audio_queue.empty():
+            try:
+                audio_queue.get_nowait()
+                audio_queue.task_done()
+            except Exception:
+                break
 
         with audio_queue.mutex:
             audio_queue.queue.clear()
@@ -171,8 +188,7 @@ class Voice:
                                     break
                             
                             syllable_finish = remaining[:break_point]
-                            syllable_48k = np.repeat(syllable_finish, 2) # Upsample to 48kHz
-                            self._dual_write(syllable_48k)
+                            self._dual_write(syllable_finish)
                             
                             tail_len = min(int(self.sample_rate * 0.05), len(remaining) - break_point)
                             if tail_len > 0:
