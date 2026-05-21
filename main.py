@@ -18,6 +18,7 @@ import re
 import random
 import subprocess
 import urllib.request
+import urllib.error
 from loguru import logger
 from huggingface_hub import hf_hub_download
 
@@ -41,10 +42,10 @@ def shutdown_containers():
     """Cleanly stops the background Docker nodes to free VRAM."""
     if getattr(config, "LAUNCH_VLLM_CONTAINERS", False):
         print("\n[System] Instructing Docker to terminate backend nodes...")
-        # FIRE AND FORGET: Use Popen instead of run so Docker doesn't hang the Python thread
-        # We also pass "-t 1" to force Docker to kill the containers quickly
+        audio_container = getattr(config, "AUDIO_CONTAINER_NAME", "audio-engine-node")
+        
         subprocess.Popen(
-            ["docker", "stop", "-t", "1", config.LLM_CONTAINER_NAME, config.VISION_CONTAINER_NAME], 
+            ["docker", "stop", "-t", "1", config.LLM_CONTAINER_NAME, config.VISION_CONTAINER_NAME, audio_container], 
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         )
@@ -108,6 +109,13 @@ def ensure_vllm_containers():
                     if response.status == 200:
                         print(f" └─ ✅ {name} is live!\n")
                         break
+            
+            # CRITICAL FIX: Catch 404/405 errors. If the server throws a 404, it means it's online!
+            except urllib.error.HTTPError as e:
+                if e.code in [404, 405]:
+                    print(f" └─ ✅ {name} is live!\n")
+                    break
+            
             except Exception:
                 elapsed = int(time.time() - start_wait)
                 print(f" └─ Initializing {name} hardware endpoints... ({elapsed}s elapsed)", end="\r")
@@ -121,7 +129,7 @@ def ensure_vllm_containers():
             "docker", "run", "-d", "--name", config.LLM_CONTAINER_NAME, "--gpus", "all",
             "-v", f"{config.LOCAL_MODELS_DIR}:/models",
             "-p", f"{config.LLM_PORT}:8000", 
-            "ghcr.io/ggml-org/llama.cpp:server-cuda", # <-- Updated Official Registry
+            "ghcr.io/ggml-org/llama.cpp:server-cuda",
             "-m", f"/models/{config.LLM_MODEL}",
             "-c", "4096",
             "--port", "8000",
@@ -134,7 +142,6 @@ def ensure_vllm_containers():
         print(f"[System] Waking primary text architecture node: {config.LLM_CONTAINER_NAME}")
         subprocess.run(["docker", "start", config.LLM_CONTAINER_NAME])
 
-    # Pass the container name so the killswitch can monitor it
     wait_for_node("Text Engine (Llama)", config.LLM_PORT, config.LLM_CONTAINER_NAME)
 
     # --- PHASE 2: MULTI-MODAL VISION INFERENCE NODE (SGLang) ---
@@ -149,8 +156,8 @@ def ensure_vllm_containers():
             "--model-path", "Qwen/Qwen2-VL-2B-Instruct",
             "--chat-template", "qwen2-vl", 
             "--port", "8005", "--host", "0.0.0.0",
-            "--mem-fraction-static", str(config.VISION_VRAM_UTIL), # Now pulls 0.23
-            "--context-length", str(config.VISION_CONTEXT)         # Now strictly limits to 2048
+            "--mem-fraction-static", str(config.VISION_VRAM_UTIL),
+            "--context-length", str(config.VISION_CONTEXT)
         ]
         subprocess.run(cmd)
     elif "Up" not in status_qwen:
@@ -158,6 +165,28 @@ def ensure_vllm_containers():
         subprocess.run(["docker", "start", config.VISION_CONTAINER_NAME])
 
     wait_for_node("Vision Engine (Qwen)", config.VISION_PORT, config.VISION_CONTAINER_NAME)
+
+    # --- PHASE 3: AUDIO PROCESSING NODE ---
+    audio_container = getattr(config, "AUDIO_CONTAINER_NAME", "audio-engine-node")
+    audio_port = getattr(config, "AUDIO_PORT", 8008)
+    status_audio = get_container_status(audio_container)
+    
+    if not status_audio:
+        print(f"[System] Building Audio Engine node: {audio_container}...")
+        subprocess.run(["docker", "build", "-t", "ada-audio-node", "./audio_node"])
+        cmd = [
+            "docker", "run", "-d", "--name", audio_container, "--gpus", "all",
+            "-v", f"{config.LOCAL_MODELS_DIR}:/models",
+            "-p", f"{audio_port}:8008", 
+            "ada-audio-node"
+        ]
+        subprocess.run(cmd)
+    elif "Up" not in status_audio:
+        print(f"[System] Waking Audio architecture node: {audio_container}")
+        subprocess.run(["docker", "start", audio_container])
+
+    # The audio endpoint doesn't have a /v1/models route, so we just test the base URL and expect a 404
+    wait_for_node("Audio Engine", audio_port, audio_container)
 
 def background_audio_worker(voice, q, telemetry, state):
     is_first_sentence_of_turn = True
@@ -356,7 +385,8 @@ def main():
                             elif char == ')': inside_paren = False
                             elif char == '*': inside_asterisk = not inside_asterisk
                             
-                            elif char in ['.', '!', '?', '\n', ',', ';', ':']:
+                            # Removed commas and semicolons so Kokoro can handle them natively!
+                            elif char in ['.', '!', '?', '\n']:
                                 if not (inside_square or inside_angle or inside_paren or inside_asterisk):
                                     boundaries.append(i)
 

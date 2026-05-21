@@ -1,10 +1,11 @@
 import os
 import time
-import threading
 import numpy as np
 import sounddevice as sd
 import torch
-from faster_whisper import WhisperModel
+import io
+import soundfile as sf
+import requests
 import onnxruntime as ort
 from huggingface_hub import hf_hub_download
 from transformers import WhisperFeatureExtractor
@@ -13,8 +14,8 @@ import config
 
 class Ear:
     def __init__(self):
-        print(f"Loading Whisper Model '{config.WHISPER_MODEL}' on CUDA...")
-        self.model = WhisperModel(config.WHISPER_MODEL, device="cuda", compute_type="int8_float16")
+        self.audio_port = getattr(config, "AUDIO_PORT", 8008)
+        print(f"[Ear] Binding to Audio API Engine on Port {self.audio_port}...")
         self.sample_rate = 16000
         self.channels = 1
         
@@ -59,7 +60,6 @@ class Ear:
         )
         self.turn_input_name = self.turn_session.get_inputs()[0].name
         
-        # Load the Whisper Feature Extractor to generate Mel Spectrograms
         self.turn_processor = WhisperFeatureExtractor.from_pretrained("openai/whisper-tiny")
         
         self.speech_start_threshold = 0.55  
@@ -71,64 +71,16 @@ class Ear:
     def listen_and_transcribe(self):
         print("\n[Ada is listening...]")
         audio_buffer = []
-        current_transcription = [""]
         pre_roll_buffer = deque(maxlen=int(self.sample_rate * 0.5))
         
         state = {
             "speech_started": False, 
-            "recording_active": True,
-            "last_speech_frame_idx": 0,
             "physical_silence_start_time": 0.0,
             "last_pipecat_poll_time": 0.0 
         }
         
         consecutive_silence_samples = 0
-        lock = threading.Lock()
         
-        def bg_transcribe_worker():
-            last_processed_idx = 0
-            while True:
-                for _ in range(5):
-                    if not state["recording_active"]:
-                        break
-                    time.sleep(0.04)
-                
-                with lock:
-                    is_active = state["recording_active"]
-                    target_idx = state["last_speech_frame_idx"]
-                    speech_begun = state["speech_started"]
-                
-                if not speech_begun or target_idx <= last_processed_idx:
-                    if not is_active:
-                        break
-                    continue
-                
-                with lock:
-                    audio_snapshot = np.array(audio_buffer[:target_idx], dtype=np.float32).flatten()
-                    last_processed_idx = target_idx
-                
-                try:
-                    segments, _ = self.model.transcribe(
-                        audio_snapshot, 
-                        beam_size=1,
-                        language="en",
-                        condition_on_previous_text=False,
-                        temperature=0.0,
-                        vad_filter=True,
-                        vad_parameters=dict(min_silence_duration_ms=250)
-                    )
-                    text = "".join([segment.text for segment in segments]).strip()
-                    with lock:
-                        current_transcription[0] = text
-                except Exception:
-                    pass
-                    
-                if not is_active:
-                    break
-
-        worker_thread = threading.Thread(target=bg_transcribe_worker, daemon=True)
-        worker_thread.start()
-
         with sd.InputStream(samplerate=self.sample_rate, channels=self.channels, dtype='float32', blocksize=512) as stream:
             while True:
                 audio_chunk, _ = stream.read(512)
@@ -142,15 +94,12 @@ class Ear:
                     pre_roll_buffer.extend(audio_chunk_flattened)
                     
                     if speech_prob > self.speech_start_threshold:
-                        with lock:
-                            state["speech_started"] = True
-                            print("\n[VAD] 🎙️ Speech Triggered (Silero)")
-                            
-                            audio_buffer.extend(pre_roll_buffer)
-                            audio_buffer.extend(audio_chunk_flattened)
-                            
-                            state["last_speech_frame_idx"] = len(audio_buffer)
-                            state["physical_silence_start_time"] = time.perf_counter()
+                        state["speech_started"] = True
+                        print("\n[VAD] 🎙️ Speech Triggered (Silero)")
+                        
+                        audio_buffer.extend(pre_roll_buffer)
+                        audio_buffer.extend(audio_chunk_flattened)
+                        state["physical_silence_start_time"] = time.perf_counter()
                             
                 else:
                     audio_buffer.extend(audio_chunk_flattened)
@@ -173,14 +122,12 @@ class Ear:
                                 pad_len = max_samples - len(audio_snapshot)
                                 audio_snapshot = np.pad(audio_snapshot, (pad_len, 0), mode='constant')
                                 
-                            # Convert raw audio into a Log-Mel Spectrogram
                             mel_features = self.turn_processor(
                                 audio_snapshot, 
                                 sampling_rate=self.sample_rate, 
                                 return_tensors="np"
                             ).input_features
                             
-                            # Whisper pads to 3000 frames by default. V3 strictly expects 800 frames.
                             mel_spectrogram = mel_features[:, :, :800]
                             
                             ort_inputs = {
@@ -202,19 +149,31 @@ class Ear:
                             
                     else:
                         consecutive_silence_samples = 0
-                        with lock:
-                            state["last_speech_frame_idx"] = len(audio_buffer)
-                            state["physical_silence_start_time"] = time.perf_counter()
+                        state["physical_silence_start_time"] = time.perf_counter()
         
+        # --- TRANSCRIBE THE COMPLETED TURN ---
         start_compute_t = time.perf_counter()
-        with lock:
-            state["recording_active"] = False
-            
-        worker_thread.join(timeout=0.3)
+        final_text = ""
         
-        with lock:
-            final_text = current_transcription[0]
-            silence_start_ts = state["physical_silence_start_time"]
+        audio_snapshot = np.array(audio_buffer, dtype=np.float32).flatten()
+        
+        try:
+            wav_io = io.BytesIO()
+            sf.write(wav_io, audio_snapshot, self.sample_rate, format='WAV', subtype='PCM_16')
+            wav_io.seek(0)
+            
+            url = f"http://localhost:{self.audio_port}/v1/audio/transcriptions"
+            files = {'file': ('audio.wav', wav_io, 'audio/wav')}
+            response = requests.post(url, files=files)
+            
+            if response.status_code == 200:
+                final_text = response.json().get("text", "").strip()
+            else:
+                print(f"[Ear] API Error: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"[Ear] Transcription Connection Error: {e}")
             
         whisper_time = time.perf_counter() - start_compute_t
+        silence_start_ts = state["physical_silence_start_time"]
+        
         return final_text, whisper_time, silence_start_ts
