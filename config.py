@@ -21,7 +21,7 @@ LLM_QUANTIZATION = "none"
 
 ACTIVE_TTS = "KOKORO" 
 KOKORO_VOICE = "af_bella"
-KOKORO_SPEED = 1.25
+KOKORO_SPEED = 1.1
 KOKORO_LANG = "a"
 
 # --- AUDIO ROUTING ---
@@ -43,7 +43,3 @@ VISION_CONTAINER_NAME = "vllm-qwen-vision"
 VISION_PORT = 8005
 VISION_VRAM_UTIL = 0.23
 VISION_CONTEXT = 2048       # Shrunk from 4096 since Vision is stateless
-
-# Add this under your Vision Engine config
-AUDIO_CONTAINER_NAME = "audio-engine-node"
-AUDIO_PORT = 8008
