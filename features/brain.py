@@ -14,7 +14,7 @@ class Brain:
         self.model_lock = threading.Lock()
         
         # Binds into your existing long-term profile memory layers
-        self.memory = MemoryManager(None, None, self.model_lock) 
+        self.memory = MemoryManager(self.client, self.model_lock) 
 
     def evaluate_interruption(self, actual_spoken, user_text):
         """Evaluates whether Ada should yield the turn during an incoming voice interruption."""
