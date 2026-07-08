@@ -4,12 +4,6 @@ warnings.filterwarnings("ignore")
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
-import transformers
-transformers.logging.set_verbosity_error()
-
-import logging
-logging.getLogger("transformers").setLevel(logging.ERROR)
-
 import sys
 import time
 import queue
@@ -19,7 +13,8 @@ import random
 import subprocess
 import urllib.request
 from loguru import logger
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
+import requests
 
 # Scrub logger bloat
 logger.remove()
@@ -38,126 +33,259 @@ telemetry_data = {"first_audio_timestamp": None}
 ada_state = {"is_speaking": False, "last_generation": "", "spoken_text": ""}
 
 def shutdown_containers():
-    """Cleanly stops the background Docker nodes to free VRAM."""
-    if getattr(config, "LAUNCH_VLLM_CONTAINERS", False):
-        print("\n[System] Instructing Docker to terminate backend nodes...")
-        # FIRE AND FORGET: Use Popen instead of run so Docker doesn't hang the Python thread
-        # We also pass "-t 1" to force Docker to kill the containers quickly
+    """Cleanly stops all background Docker nodes to free VRAM."""
+    containers = [
+        getattr(config, "LLM_CONTAINER_NAME", None),
+        getattr(config, "VISION_CONTAINER_NAME", None),
+        getattr(config, "VOXTRAL_CONTAINER_NAME", None),
+    ]
+    
+    # Filter out None values
+    target_containers = [c for c in containers if c]
+    
+    if target_containers and getattr(config, "LAUNCH_VLLM_CONTAINERS", False):
+        print(f"\n[System] Instructing Docker to terminate nodes: {target_containers}...")
         subprocess.Popen(
-            ["docker", "stop", "-t", "1", config.LLM_CONTAINER_NAME, config.VISION_CONTAINER_NAME], 
+            ["docker", "stop", "-t", "1"] + target_containers, 
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         )
         print("[System] VRAM release initiated.")
 
 def ensure_local_models():
-    """Autonomously verifies and downloads GGUF models from Hugging Face if missing."""
-    if not os.path.exists(config.LOCAL_MODELS_DIR):
-        os.makedirs(config.LOCAL_MODELS_DIR)
-
-    model_path = os.path.join(config.LOCAL_MODELS_DIR, config.LLM_MODEL)
+    """Pre-flight directory validation checks to ensure core assets exist."""
+    active_tts = getattr(config, "ACTIVE_TTS", "KOKORO")
     
-    if not os.path.exists(model_path):
-        print(f"\n[System] Local model '{config.LLM_MODEL}' not found.")
-        print(f"[System] Initiating secure pull from HuggingFace Hub ({config.HF_LLM_REPO})...")
-        print("[System] This is a ~4.9GB transfer. Please wait...")
-        
+    # 1. LLM Verification
+    llm_path = os.path.join(config.LOCAL_MODELS_DIR, config.LLM_MODEL)
+    if os.path.exists(llm_path):
+        print(f"[System] Verified local model matrix: {config.LLM_MODEL}")
+    else:
+        print(f"[System] ⚠️ LLM Matrix file missing at: {llm_path}")
+
+    # 2. TTS Setup Branch Verification
+    if active_tts == "KOKORO":
+        kokoro_path = os.path.join(config.LOCAL_MODELS_DIR, "kokoro-v1.0.onnx")
+        if os.path.exists(kokoro_path):
+            print(f"[System] Verified local TTS matrix: kokoro-v1.0.onnx")
+    elif active_tts == "QWEN_TTS":
+        # FIX: Check for the new Qwen directory path layout maps
+        qwen_dir = os.path.join(config.LOCAL_MODELS_DIR, "qwen3_tts_1.7b")
+        if os.path.exists(os.path.join(qwen_dir, "config.json")):
+            print(f"[System] Verified local TTS matrix: Qwen3-TTS Directory Status [Valid]")
+        else:
+            print(f"[System] Qwen3-TTS local weights missing. Initializing automatic synchronization loop...")
+
+    print("\n[System] Initializing Ada Core (Native Monolithic Mode)")
+    print("[System] Allocating VRAM for AI stack...")
+
+    # --- 2. KOKORO ONNX CHECK ---
+    kokoro_path = os.path.join(config.LOCAL_MODELS_DIR, "kokoro-v1.0.onnx")
+    voices_path = os.path.join(config.LOCAL_MODELS_DIR, "voices-v1.0.bin")
+    
+    if not os.path.exists(kokoro_path) or not os.path.exists(voices_path):
+        print("\n[System] Kokoro v1.0 ONNX assets not found. Downloading directly from GitHub releases...")
         try:
-            hf_hub_download(
-                repo_id=config.HF_LLM_REPO,
-                filename=config.LLM_MODEL,
-                local_dir=config.LOCAL_MODELS_DIR,
-                local_dir_use_symlinks=False
+            import urllib.request
+            
+            print("[System] Downloading kokoro-v1.0.onnx...")
+            urllib.request.urlretrieve(
+                "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx", 
+                kokoro_path
             )
-            print("[System] ✅ Model payload successfully acquired and verified.\n")
+            
+            print("[System] Downloading voices-v1.0.bin...")
+            urllib.request.urlretrieve(
+                "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin", 
+                voices_path
+            )
+            
+            print("[System] ✅ Kokoro ONNX assets successfully acquired.\n")
         except Exception as e:
-            print(f"[System] FATAL: Failed to download model payload: {e}")
+            print(f"[System] FATAL: Failed to download Kokoro ONNX payload: {e}")
             os._exit(1)
     else:
-        print(f"[System] Verified local model matrix: {config.LLM_MODEL}")
+        print(f"[System] Verified local TTS matrix: kokoro-v1.0.onnx")
 
-def ensure_vllm_containers():
-    """Verifies and starts optimized Docker nodes sequentially with crash detection."""
-    if not getattr(config, "LAUNCH_VLLM_CONTAINERS", False):
-        return
-
-    print("\n[System] Verifying local container runtime states...")
-    
-    def get_container_status(name):
+def get_container_status(container_name):
+    """Queries the local Docker engine to check the current health status of a named node."""
+    try:
         res = subprocess.run(
-            ["docker", "ps", "-a", "--filter", f"name={name}", "--format", "{{.Status}}"],
+            ["docker", "ps", "-a", "--format", "{{.Status}}", "-f", f"name={container_name}"],
             capture_output=True, text=True
         )
         return res.stdout.strip()
+    except Exception:
+        return ""
 
-    def wait_for_node(name, port, container_name):
-        print(f"[System] Waiting for {name} matrix validation...")
-        url = f"http://localhost:{port}/v1/models"
-        start_wait = time.time()
-        while True:
-            # Killswitch: Check if container died or failed to build so we don't hang forever
-            status = get_container_status(container_name)
-            if "Exited" in status or not status:
-                print(f"\n[System] 🛑 FATAL: {name} container crashed or failed to start.")
-                print(f"[System] Run 'docker logs {container_name}' in your terminal to see why.")
-                os._exit(1)
+def wait_for_node(url, name, timeout=300):
+    """Blocks execution loop until the target vLLM engine HTTP interface returns a healthy status."""
+    start = time.time()
+    print(f"[System] Waiting for {name} matrix validation...")
+    while time.time() - start < timeout:
+        try:
+            res = requests.get(url, timeout=2)
+            if res.status_code == 200:
+                return True
+        except requests.exceptions.RequestException:
+            time.sleep(2)
+    print(f"\n[System] 🛑 FATAL: {name} container crashed or failed to start.")
+    exit(1)
 
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=1) as response:
-                    if response.status == 200:
-                        print(f" └─ ✅ {name} is live!\n")
-                        break
-            except Exception:
-                elapsed = int(time.time() - start_wait)
-                print(f" └─ Initializing {name} hardware endpoints... ({elapsed}s elapsed)", end="\r")
-                time.sleep(2.0)
+def ensure_local_models():
+    """Pre-flight validation checks to confirm that core local model elements exist on disk."""
+    active_tts = getattr(config, "ACTIVE_TTS", "KOKORO")
+    
+    # 1. LLM Verification
+    llm_path = os.path.join(config.LOCAL_MODELS_DIR, config.LLM_MODEL)
+    if os.path.exists(llm_path):
+        print(f"[System] Verified local model matrix: {config.LLM_MODEL}")
+    else:
+        print(f"[System] ⚠️ LLM Matrix file missing at: {llm_path}")
 
-    # --- PHASE 1: TEXT INFERENCE NODE (llama.cpp) ---
+    # 2. TTS Setup Branch Verification
+    if active_tts == "KOKORO":
+        kokoro_path = os.path.join(config.LOCAL_MODELS_DIR, "kokoro-v1.0.onnx")
+        if os.path.exists(kokoro_path):
+            print(f"[System] Verified local TTS matrix: kokoro-v1.0.onnx")
+    elif active_tts == "QWEN_TTS":
+        qwen_dir = os.path.join(config.LOCAL_MODELS_DIR, "qwen3_tts_1.7b")
+        if os.path.exists(os.path.join(qwen_dir, "config.json")):
+            print(f"[System] Verified local TTS matrix: Qwen3-TTS Directory Status [Valid]")
+        else:
+            print(f"[System] Qwen3-TTS local weights missing. Initializing automatic synchronization loop...")
+
+    print("\n[System] Initializing Ada Core (Native Monolithic Mode)")
+    print("[System] Allocating VRAM for AI stack...")
+
+def ensure_vllm_containers():
+    """Validates container orchestration layouts and hooks up runtime acceleration engines."""
+    if not getattr(config, "LAUNCH_VLLM_CONTAINERS", True):
+        return
+
+    print("[System] Verifying local container runtime states...")
+
+    # --- PHASE 1: COGNITIVE TEXT ENGINE NODE (Llama 3.1 GGUF vLLM Stack) ---
     status_llama = get_container_status(config.LLM_CONTAINER_NAME)
     if not status_llama:
-        print(f"[System] Building bare-metal C++ text node: {config.LLM_CONTAINER_NAME}...")
+        print(f"[System] Launching primary text architecture node: {config.LLM_CONTAINER_NAME}...")
+        abs_checkpoints_dir = os.path.abspath(config.LOCAL_MODELS_DIR)
+        
         cmd = [
-            "docker", "run", "-d", "--name", config.LLM_CONTAINER_NAME, "--gpus", "all",
-            "-v", f"{config.LOCAL_MODELS_DIR}:/models",
-            "-p", f"{config.LLM_PORT}:8000", 
-            "ghcr.io/ggml-org/llama.cpp:server-cuda", # <-- Updated Official Registry
-            "-m", f"/models/{config.LLM_MODEL}",
-            "-c", "4096",
-            "--port", "8000",
+            "docker", "run", "-d",
+            "--name", config.LLM_CONTAINER_NAME,
+            "--gpus", "all",
+            "--ipc=host",
+            "-p", f"{config.LLM_PORT}:8000",
+            "-v", f"{config.HF_CACHE_DIR}:/root/.cache/huggingface",
+            "-v", f"{abs_checkpoints_dir}:/app/checkpoints",
+            "vllm/vllm-openai:latest",
+            "--model", f"/app/checkpoints/{config.LLM_MODEL}",
+            "--tokenizer", "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "--host", "0.0.0.0",
-            "-ngl", "99",
-            "-cb"
+            "--port", "8000",
+            "--gpu-memory-utilization", "0.60",
+            "--max-model-len", "4096"
         ]
         subprocess.run(cmd)
     elif "Up" not in status_llama:
         print(f"[System] Waking primary text architecture node: {config.LLM_CONTAINER_NAME}")
         subprocess.run(["docker", "start", config.LLM_CONTAINER_NAME])
 
-    # Pass the container name so the killswitch can monitor it
-    wait_for_node("Text Engine (Llama)", config.LLM_PORT, config.LLM_CONTAINER_NAME)
+    wait_for_node(f"http://localhost:{config.LLM_PORT}/v1/models", "Text Engine (Llama)")
 
-    # --- PHASE 2: MULTI-MODAL VISION INFERENCE NODE (SGLang) ---
-    status_qwen = get_container_status(config.VISION_CONTAINER_NAME)
-    if not status_qwen:
-        print(f"[System] Building SGLang vision node: {config.VISION_CONTAINER_NAME}...")
-        cmd = [
-            "docker", "run", "-d", "--name", config.VISION_CONTAINER_NAME, "--gpus", "all",
-            "--ipc=host", "-v", f"{config.HF_CACHE_DIR}:/root/.cache/huggingface",
-            "-p", f"{config.VISION_PORT}:8005", "lmsysorg/sglang:latest",
-            "python3", "-m", "sglang.launch_server",
-            "--model-path", "Qwen/Qwen2-VL-2B-Instruct",
-            "--chat-template", "qwen2-vl", 
-            "--port", "8005", "--host", "0.0.0.0",
-            "--mem-fraction-static", str(config.VISION_VRAM_UTIL), # Now pulls 0.23
-            "--context-length", str(config.VISION_CONTEXT)         # Now strictly limits to 2048
-        ]
-        subprocess.run(cmd)
-    elif "Up" not in status_qwen:
-        print(f"[System] Waking primary vision architecture node: {config.VISION_CONTAINER_NAME}")
-        subprocess.run(["docker", "start", config.VISION_CONTAINER_NAME])
+    # --- PHASE 3: AUDIO PROCESSING NODE (Custom Isolated ONNX Qwen3-TTS Container Stack) ---
+    active_tts = getattr(config, "ACTIVE_TTS", "KOKORO")
+    
+    if active_tts == "KOKORO":
+        target_model_dir = os.path.join(config.LOCAL_MODELS_DIR)
+        kokoro_onnx_filename = "kokoro-v1.0.onnx"
+        kokoro_onnx_path = os.path.join(target_model_dir, kokoro_onnx_filename)
+        
+        if not os.path.exists(kokoro_onnx_path):
+            print("[System] Synchronizing stable Kokoro ONNX model weights...")
+            os.makedirs(target_model_dir, exist_ok=True)
+            hf_hub_download(repo_id="hexgrad/Kokoro-82M", filename=kokoro_onnx_filename, local_dir=target_model_dir)
+            hf_hub_download(repo_id="hexgrad/Kokoro-82M", filename="voices.bin", local_dir=target_model_dir)
+            print("✅ Kokoro ONNX assets fully verified on disk.")
+            
+    elif active_tts == "QWEN_TTS":
+        model_folder_name = config.QWEN_MODEL.split("/")[-1].lower().replace("-", "_")
+        target_model_dir = os.path.join(config.LOCAL_MODELS_DIR, model_folder_name)
+        
+        marker_config = os.path.join(target_model_dir, "config.json")
+        if not os.path.exists(marker_config):
+            print(f"[System] Snapshot marker missing. Synchronizing {config.QWEN_MODEL} assets...")
+            os.makedirs(target_model_dir, exist_ok=True)
+            snapshot_download(repo_id=config.QWEN_MODEL, local_dir=target_model_dir, ignore_patterns=["*.msgpack", "*.h5", "*.ot"])
+            print(f"✅ {config.QWEN_MODEL} matrix assets fully verified on disk.")
 
-    wait_for_node("Vision Engine (Qwen)", config.VISION_PORT, config.VISION_CONTAINER_NAME)
+        status_qwen = get_container_status(config.QWEN_CONTAINER_NAME)
+        if not status_qwen:
+            print("[System] Compiling clean custom PyTorch TTS node container...")
+            node_context_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "qwentts_node"))
+            subprocess.run(["docker", "build", "-t", "ada-qwentts-node", node_context_dir])
+            
+            print(f"[System] Launching Isolated Custom Qwen-TTS Node Container: {config.QWEN_CONTAINER_NAME}...")
+            abs_checkpoints_dir = os.path.abspath(target_model_dir)
+
+            cmd = [
+                "docker", "run", "-d", 
+                "--name", config.QWEN_CONTAINER_NAME,
+                "--gpus", "all",                      
+                "--ipc=host",
+                "-p", f"{config.QWEN_PORT}:8000",      
+                "-v", f"{config.HF_CACHE_DIR}:/root/.cache/huggingface",
+                "-v", f"{abs_checkpoints_dir}:/app/model",
+                "ada-qwentts-node"
+            ]
+            subprocess.run(cmd)
+        elif "Up" not in status_qwen:
+            print(f"[System] Waking Optimized Audio node: {config.QWEN_CONTAINER_NAME}")
+            subprocess.run(["docker", "start", config.QWEN_CONTAINER_NAME])
+
+        # HEALTH VERIFICATION LOOP
+        import requests
+        print(f"[System] Waiting for Nano-vLLM Engine Pipeline initialization...")
+        health_url = f"http://{config.QWEN_HOST}:{config.QWEN_PORT}/health"
+        start_wait = time.time()
+        engine_ready = False
+        
+        while time.time() - start_wait < 300: 
+            try:
+                response = requests.get(health_url, timeout=2)
+                if response.status_code == 200: 
+                    print(f"\n✅ Production Nano-vLLM Audio Engine Active on port {config.QWEN_PORT}!")
+                    engine_ready = True
+                    break
+            except requests.exceptions.RequestException:
+                print(".", end="", flush=True)
+                time.sleep(4)
+                
+        if not engine_ready:
+            print("\n🛑 FATAL: Timeout boundary exceeded waiting for vLLM audio node backend.")
+            exit(1)
+        
+    else:
+        audio_container = getattr(config, "AUDIO_CONTAINER_NAME", "audio-engine-node")
+        audio_port = getattr(config, "AUDIO_PORT", 8008)
+        status_audio = get_container_status(audio_container)
+        
+        if not status_audio:
+            print(f"[System] Building Local Audio Engine node (Kokoro): {audio_container}...")
+            subprocess.run(["docker", "build", "-t", "ada-audio-node", "./audio_node"])
+            cmd = [
+                "docker", "run", "-d", "--name", audio_container, "--gpus", "all",
+                "-v", f"{config.LOCAL_MODELS_DIR}:/models",
+                "-p", f"{audio_port}:8008", 
+                "ada-audio-node"
+            ]
+            subprocess.run(cmd)
+        elif "Up" not in status_audio:
+            print(f"[System] Waking Audio architecture node: {audio_container}")
+            subprocess.run(["docker", "start", audio_container])
+
+        wait_for_node("Audio Engine", audio_port, audio_container)
 
 def background_audio_worker(voice, q, telemetry, state):
     is_first_sentence_of_turn = True
@@ -323,73 +451,60 @@ def main():
                 buffer = ""
                 ada_state["last_generation"] = ""
                 requires_auto_look = False
+                
+                # Configurable sentence window pool
+                sentence_pool = []
+                is_first_sentence = True
+                target_window = getattr(config, "QWEN_SENTENCE_WINDOW", 2)
 
                 for chunk in brain.get_response_stream(text_to_process, screen_context=visual_context):
-                    if brain.abort_event.is_set():
-                        break
+                    if brain.abort_event.is_set(): break
                         
                     print(chunk, end="", flush=True)
                     buffer += chunk
                     ada_state["last_generation"] += chunk
                     
-                    if "[LOOK]" in buffer:
-                        if is_retry:
-                            buffer = buffer.replace("[LOOK]", "")
-                        else:
-                            requires_auto_look = True
-                            brain.abort_event.set() 
-                            break
-
-                    while True:
-                        boundaries = []
-                        inside_square = False
-                        inside_angle = False
-                        inside_paren = False
-                        inside_asterisk = False
-
-                        for i, char in enumerate(buffer):
-                            if char == '[': inside_square = True
-                            elif char == ']': inside_square = False
-                            elif char == '<': inside_angle = True
-                            elif char == '>': inside_angle = False
-                            elif char == '(': inside_paren = True
-                            elif char == ')': inside_paren = False
-                            elif char == '*': inside_asterisk = not inside_asterisk
-                            
-                            elif char in ['.', '!', '?', '\n', ',', ';', ':']:
-                                if not (inside_square or inside_angle or inside_paren or inside_asterisk):
-                                    boundaries.append(i)
-
-                        if not boundaries:
-                            break
-
-                        idx = boundaries[0]
-                        sentence = buffer[: idx + 1]
+                    if any(p in chunk for p in ['.', '!', '?']):
+                        idx = max(buffer.rfind('.'), buffer.rfind('!'), buffer.rfind('?'))
+                        raw_sentence = buffer[: idx + 1]
                         buffer = buffer[idx + 1:]
-
-                        clean_sentence = sentence.strip()
+                        
+                        clean_sentence = raw_sentence.strip()
                         if clean_sentence:
                             actions = re.findall(r'\*(.*?)\*', clean_sentence)
-                            for action in actions:
-                                if action.strip():
-                                    vts.trigger_action(action.strip())
-                                    
-                            speech_only = re.sub(r'\*.*?\*', '', clean_sentence)
-                            speech_only = speech_only.replace("[LOOK]", "").replace("...", ",").replace("..", ",").strip()
+                            for action in actions: 
+                                vts.trigger_action(action.strip())
                             
-                            if speech_only:
-                                audio_queue.put((speech_only, time.perf_counter()))
+                            speech_only = re.sub(r'\*.*?\*', '', clean_sentence).strip()
+                            speech_only = speech_only.replace("'", "").replace('"', '').strip()
+                            
+                            if len(speech_only) > 1:
+                                # Always dispatch the very first sentence immediately for instant TTFA
+                                if is_first_sentence:
+                                    audio_queue.put((speech_only, time.perf_counter()))
+                                    is_first_sentence = False
+                                else:
+                                    sentence_pool.append(speech_only)
+                                    if len(sentence_pool) >= target_window:
+                                        combined_chunk = " ".join(sentence_pool)
+                                        audio_queue.put((combined_chunk, time.perf_counter()))
+                                        sentence_pool.clear()
 
-                if buffer.strip() and not brain.abort_event.is_set():
-                    actions = re.findall(r'\*(.*?)\*', buffer.strip())
+                # Clean up trailing stream text fragments
+                remaining_text = buffer.strip()
+                if remaining_text and not brain.abort_event.is_set():
+                    actions = re.findall(r'\*(.*?)\*', remaining_text)
                     for action in actions:
-                        if action.strip():
-                            vts.trigger_action(action.strip())
-                            
-                    speech_only = re.sub(r'\*.*?\*', '', buffer.strip())
-                    speech_only = speech_only.replace("[LOOK]", "").replace("...", ",").replace("..", ",").strip()
+                        vts.trigger_action(action.strip())
+                    
+                    speech_only = re.sub(r'\*.*?\*', '', remaining_text).strip()
+                    speech_only = speech_only.replace("[LOOK]", "").strip()
                     if speech_only:
-                        audio_queue.put((speech_only, time.perf_counter()))
+                        sentence_pool.append(speech_only)
+
+                if sentence_pool and not brain.abort_event.is_set():
+                    combined_chunk = " ".join(sentence_pool)
+                    audio_queue.put((combined_chunk, time.perf_counter()))
                 
                 print()
                 

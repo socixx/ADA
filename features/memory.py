@@ -2,20 +2,20 @@ import time
 import json
 import os
 import threading
-import torch
 import re
 import numpy as np
 import config
 from fastembed import TextEmbedding
+from openai import OpenAI
 
 class MemoryManager:
-    def __init__(self, tokenizer, model, model_lock):
-        self.tokenizer = tokenizer
-        self.model = model
+    def __init__(self, model_lock):
         self.model_lock = model_lock
         
+        # Connect to the local vLLM Docker node for memory summarization tasks
+        self.client = OpenAI(base_url=f"http://localhost:{config.LLM_PORT}/v1", api_key="token")
+        
         print("[Memory] Loading FastEmbed ONNX Engine ('all-MiniLM-L6-v2')...")
-        # Initialize FastEmbed instead of sentence_transformers
         self.embedder = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
         self.timeline_embeddings = None
         
@@ -129,24 +129,24 @@ class MemoryManager:
                     "SUMMARY SENTENCE (Start with an action verb, max 12 words):"
                 )
                 
-                inputs = self.tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
-                inputs = {k: v.to("cuda") for k, v in inputs.items()}
-                
-                with torch.inference_mode():
-                    outputs = self.model.generate(**inputs, max_new_tokens=40, temperature=0.3, pad_token_id=self.tokenizer.eos_token_id)
-                
-                summary = self.tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True).strip()
-                
-                if summary and "NONE" not in summary.upper():
-                    print(f"[Long-Term Timeline] Consolidated: \"{summary}\"")
-                    try:
+                try:
+                    response = self.client.chat.completions.create(
+                        model=config.LLM_MODEL,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.3,
+                        max_tokens=40
+                    )
+                    summary = response.choices[0].message.content.strip()
+                    
+                    if summary and "NONE" not in summary.upper():
+                        print(f"[Long-Term Timeline] Consolidated: \"{summary}\"")
                         with open(self.timeline_file, "r") as f:
                             timeline = json.load(f)
                         timeline.append(f"{time.strftime('%Y-%m-%d %H:%M')} - {summary}")
                         with open(self.timeline_file, "w") as f:
                             json.dump(timeline, f, indent=4)
-                    except Exception as e:
-                        print(f"[Timeline Write Error] {e}")
+                except Exception as e:
+                    print(f"[Timeline Write Error] {e}")
 
         threading.Thread(target=consolidation_task, daemon=True).start()
 
@@ -175,24 +175,27 @@ class MemoryManager:
                     "OUTPUT:"
                 )
                 
-                inputs = self.tokenizer.apply_chat_template([{"role": "user", "content": extraction_prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
-                inputs = {k: v.to("cuda") for k, v in inputs.items()}
-                
-                with torch.inference_mode():
-                    outputs = self.model.generate(**inputs, max_new_tokens=40, temperature=0.1, pad_token_id=self.tokenizer.eos_token_id)
+                try:
+                    response = self.client.chat.completions.create(
+                        model=config.LLM_MODEL,
+                        messages=[{"role": "user", "content": extraction_prompt}],
+                        temperature=0.1,
+                        max_tokens=40
+                    )
+                    result = response.choices[0].message.content.strip()
                     
-                result = self.tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True).strip()
-                
-                for line in result.split("\n"):
-                    clean_line = line.strip()
-                    if "USER FACT:" in clean_line:
-                        fact = clean_line.split("USER FACT:")[-1].strip()
-                        if fact and "NONE" not in fact.upper():
-                            print(f"[Profile Memory] Saved User Fact: \"{fact}\"")
-                            user_memories.append(fact)
-                            with open(self.profile_file, "w") as f:
-                                json.dump(user_memories, f, indent=4)
-                            self._refresh_identity()
+                    for line in result.split("\n"):
+                        clean_line = line.strip()
+                        if "USER FACT:" in clean_line:
+                            fact = clean_line.split("USER FACT:")[-1].strip()
+                            if fact and "NONE" not in fact.upper():
+                                print(f"[Profile Memory] Saved User Fact: \"{fact}\"")
+                                user_memories.append(fact)
+                                with open(self.profile_file, "w") as f:
+                                    json.dump(user_memories, f, indent=4)
+                                self._refresh_identity()
+                except Exception as e:
+                    print(f"[Shadow Scribe Error] {e}")
 
         threading.Thread(target=extraction_task, daemon=True).start()
 
@@ -223,16 +226,16 @@ class MemoryManager:
                 "EPOCH SUMMARY PARAGRAPH:"
             )
 
-            inputs = self.tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
-            inputs = {k: v.to("cuda") for k, v in inputs.items()}
-            
-            with torch.inference_mode():
-                outputs = self.model.generate(**inputs, max_new_tokens=150, temperature=0.3, pad_token_id=self.tokenizer.eos_token_id)
+            try:
+                response = self.client.chat.completions.create(
+                    model=config.LLM_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=150
+                )
+                summary = response.choices[0].message.content.strip()
                 
-            summary = self.tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True).strip()
-            
-            if summary:
-                try:
+                if summary:
                     with open(self.archive_file, "r") as f:
                         archive = json.load(f)
                     
@@ -246,5 +249,5 @@ class MemoryManager:
                         json.dump(timeline[-3:], f, indent=4)
                         
                     print(f"[Memory] Consolidation Complete:\n{archive_entry}\n")
-                except Exception as e:
-                    print(f"[Archive Write Error] {e}")
+            except Exception as e:
+                print(f"[Archive Write Error] {e}")

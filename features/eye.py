@@ -7,13 +7,20 @@ import config
 
 class Eye:
     def __init__(self):
+        self.enabled = getattr(config, "ENABLE_VISION", True)
+        if not self.enabled:
+            print("[Eye] Vision disabled via config. Screen awareness offline.")
+            self.client = None
+            self.sct = None
+            return
         print("[Eye] Connecting to local vLLM Vision Node (Port 8005)...")
-        # Lightweight network node interface -> Uses 0MB of local Windows VRAM
         self.client = OpenAI(base_url=f"http://localhost:{config.VISION_PORT}/v1", api_key="token")
         self.sct = mss.mss()
 
     def look_at_screen(self, user_question="Scan the entire screen layout. Extract and list all visible text blocks, window titles, open applications, terminal outputs, active video metadata, and chat logs in full detail."):
         """Captures framebuffers and offloads dense visual analysis to the vLLM container."""
+        if not self.enabled:
+            return "[Vision offline — ENABLE_VISION is False in config.]"
         try:
             print("[Eye] Snapping screenshot...")
             monitor = self.sct.monitors[1]
