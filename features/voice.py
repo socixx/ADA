@@ -8,6 +8,7 @@ import os
 import requests
 import re
 import queue  # Required for the background playback buffer
+import json
 
 class Voice:
     def _get_device_id(self, target_name):
@@ -35,7 +36,11 @@ class Voice:
         self.playback_thread = threading.Thread(target=self._playback_loop, daemon=True)
         self.playback_thread.start()
         
-        self.sample_rate = 24000 if self.active_engine == "QWEN_TTS" else 24000
+        # Sample rate sets dynamically based on the active engine selection branch
+        if self.active_engine == "KOKORO":
+            self.sample_rate = 24000
+        else:
+            self.sample_rate = 44100 # Supertonic 3 outputs 44.1kHz natively
 
         vts_id = self._get_device_id(config.VTS_CABLE_DEVICE_NAME)
         hw_id = self._get_device_id(config.HARDWARE_DEVICE_NAME)
@@ -46,7 +51,7 @@ class Voice:
         try:
             if vts_id is not None:
                 self.vts_stream = sd.OutputStream(
-                    samplerate=48000, channels=2, dtype='int16', device=vts_id
+                    samplerate=self.sample_rate, channels=2, dtype='int16', device=vts_id
                 )
                 self.vts_stream.start()
                 print(f"[Voice] VTS Stream bound to: '{config.VTS_CABLE_DEVICE_NAME}' (ID: {vts_id})")
@@ -55,7 +60,7 @@ class Voice:
 
         try:
             self.hardware_stream = sd.OutputStream(
-                samplerate=48000, channels=2, dtype='int16', device=hw_id
+                samplerate=self.sample_rate, channels=2, dtype='int16', device=hw_id
             )
             self.hardware_stream.start()
             print(f"[Voice] Hardware Stream bound to: Default/Ears")
@@ -82,14 +87,7 @@ class Voice:
         if audio_data.ndim == 1:
             audio_data = audio_data.reshape(-1, 1)
             
-        if self.active_engine == "FISH_AUDIO":
-            xp = np.linspace(0, 1, len(audio_data))
-            x_new = np.linspace(0, 1, int(len(audio_data) * (48000 / 44100)))
-            audio_data_48k = np.interp(x_new, xp, audio_data.flatten()).reshape(-1, 1)
-        else:
-            audio_data_48k = np.repeat(audio_data, 2, axis=0)
-
-        stereo_data = np.concatenate((audio_data_48k, audio_data_48k), axis=1)
+        stereo_data = np.concatenate((audio_data, audio_data), axis=1)
         stereo_data_int16 = np.clip(stereo_data * 32767, -32768, 32767).astype(np.int16)
 
         futures = []
@@ -98,8 +96,6 @@ class Voice:
         if getattr(self, 'hardware_stream', None) is not None:
             futures.append(self.executor.submit(self._safe_write, self.hardware_stream, stereo_data_int16))
             
-        # This is the line that was causing the bottleneck! 
-        # Moving it to the background thread fixes everything.
         if futures:
             concurrent.futures.wait(futures)
 
@@ -124,14 +120,15 @@ class Voice:
     def reset_stop(self):
         self.stop_event.clear()
 
-    def generate_voice_chunk(self, text: str):
+    def generate_voice_chunk(self, text: str, speed: float = 1.0, quality_steps: int = 8):
         clean_text = text.strip()
         if not clean_text:
             return None, self.sample_rate, 0.0
         
+        # --- BRANCH A: LOCAL NATIVE KOKORO STREAM ENGINE ---
         if self.active_engine == "KOKORO":
-            url = f"http://127.0.0.1:{getattr(config, 'AUDIO_PORT', 8008)}/v1/audio/speech"
-            payload = {"input": clean_text, "voice": config.KOKORO_VOICE, "speed": getattr(config, "KOKORO_SPEED", 1.1)}
+            url = f"http://127.0.0.1:8008/v1/audio/speech"
+            payload = {"input": clean_text, "voice": config.KOKORO_VOICE, "speed": config.KOKORO_SPEED}
             
             try:
                 response = self.http_session.post(url, json=payload, stream=True, timeout=None)
@@ -157,7 +154,6 @@ class Voice:
                         raw_int16_samples = np.frombuffer(raw_bytes, dtype=np.int16)
                         normalized_float32_samples = raw_int16_samples.astype(np.float32) / 32767.0
                         
-                        # Instantly throw to the playback thread instead of blocking
                         self.playback_queue.put(normalized_float32_samples)
                         
                     if self.stop_event.is_set():
@@ -176,14 +172,20 @@ class Voice:
                 print(f"[Voice Engine Error] Kokoro stream failure: {e}")
                 return None, self.sample_rate, 0.0
 
-        # --- QWEN UNTHROTTLED PROGRESSIVE STREAMING CONSUMER ---
+        # --- BRANCH B: DOCKER CONTAINERIZED SUPERTONIC ENGINE ---
         else:
-            url = f"http://{config.QWEN_HOST}:{config.QWEN_PORT}/v1/audio/speech"
+            clean_text = text.replace(",,", ", ").strip()
+            url = f"http://{config.TTS_HOST}:{config.TTS_PORT}/v1/audio/speech"
+            
             payload = {
                 "input": clean_text,
-                "voice": "ono_anna",
-                "speed": 1.0
+                "voice": getattr(config, "TTS_VOICE", "F1"),
+                "speed": float(speed),
+                "total_steps": int(quality_steps)  # Matches the updated BaseModel
             }
+
+            # --- DEBUGLINE: PRINT EXACT HOST PAYLOAD ---
+            # print(f"\n[Voice Debug] Shipping JSON Payload to Container:\n{json.dumps(payload, indent=2)}")
 
             try:
                 response = self.http_session.post(url, json=payload, stream=True, timeout=None)
@@ -209,7 +211,6 @@ class Voice:
                         raw_int16_samples = np.frombuffer(raw_bytes, dtype=np.int16)
                         normalized_float32_samples = raw_int16_samples.astype(np.float32) / 32767.0
                         
-                        # Immediately hand the audio chunk off to the playback thread
                         self.playback_queue.put(normalized_float32_samples)
                         
                     if self.stop_event.is_set():
@@ -225,7 +226,7 @@ class Voice:
                 return None, self.sample_rate, 0.0
                 
             except Exception as e:
-                print(f"[Voice Engine Error] Streaming socket failure: {e}")
+                print(f"[Voice Engine Error] Supertonic container stream link failure: {e}")
                 return None, self.sample_rate, 0.0
 
     def __del__(self):

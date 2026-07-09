@@ -11,9 +11,12 @@ __pycache__/
 # Local Memory & Logs (Keep Ada's specific memories out of version control)
 memory/*.json
 *.log
+character_files/vts_token.txt
+training_logs.jsonl
 
 # Heavy AI Models & Weights
 models/
+.cache/
 
 # Dynamic Media (Audio inputs/outputs)
 *.wav
@@ -24,3 +27,5 @@ models/
 .idea/
 .DS_Store
 Thumbs.db
+
+.ui_profile_cache

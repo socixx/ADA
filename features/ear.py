@@ -36,6 +36,7 @@ class Ear:
 
         if not os.path.exists(vad_model_path):
             print(f"\n[Ear] Downloading VAD model {vad_filename}...")
+            from huggingface_hub import hf_hub_download
             hf_hub_download(
                 repo_id=hf_vad_repo, 
                 filename=vad_filename, 
@@ -61,12 +62,19 @@ class Ear:
         
         self.speech_start_threshold = 0.55  
         self.speech_end_threshold = 0.45    
-        self.turn_threshold = config.SEMANTIC_TURN_THRESHOLD
-        self.hard_fallback_timeout = config.SILENCE_TIMEOUT 
-        self.volume_threshold = config.VAD_THRESHOLD 
+        self.turn_threshold = getattr(config, "SEMANTIC_TURN_THRESHOLD", 0.5)
+        self.hard_fallback_timeout = getattr(config, "SILENCE_TIMEOUT", 1.5)
+        self.volume_threshold = getattr(config, "VAD_THRESHOLD", 0.1)
 
     def listen_and_transcribe(self):
         print("\n[Ada is listening...]")
+        
+        # --- UI TELEMETRY HOOK ---
+        try: 
+            import eel
+            eel.update_telemetry_detailed("ear", "Listening...", "#10b981", "Mic Open") 
+        except Exception: pass
+        
         audio_buffer = []
         current_transcription = [""]
         pre_roll_buffer = deque(maxlen=int(self.sample_rate * 0.5))
@@ -85,7 +93,6 @@ class Ear:
         def bg_transcribe_worker(shared_state, shared_lock):
             last_processed_idx = 0
             while True:
-                # Polling interval
                 time.sleep(0.1)
                 
                 with shared_lock:
@@ -100,7 +107,6 @@ class Ear:
                     continue
                 
                 with shared_lock:
-                    # Create a copy of the buffer to process to avoid modifying while transcribing
                     audio_snapshot = np.array(audio_buffer[:target_idx], dtype=np.float32).flatten()
                     last_processed_idx = target_idx
                 
@@ -119,7 +125,7 @@ class Ear:
         worker_thread = threading.Thread(target=bg_transcribe_worker, args=(state, lock), daemon=True)
         worker_thread.start()
         
-        consecutive_silence_samples = 0  # must init before loop; CPU Whisper exposes this missing init
+        consecutive_silence_samples = 0  
         with sd.InputStream(samplerate=self.sample_rate, channels=self.channels, dtype='float32', blocksize=512) as stream:
             while True:
                 audio_chunk, _ = stream.read(512)
@@ -137,6 +143,12 @@ class Ear:
                         with lock:
                             state["speech_started"] = True
                             print("\n[VAD] 🎙️ Speech Triggered (Silero ONNX)")
+                            
+                            # --- UI TELEMETRY HOOK ---
+                            try: 
+                                import eel
+                                eel.update_telemetry_detailed("ear", "Detecting Speech...", "#3b82f6", "Active") 
+                            except Exception: pass
                             
                             audio_buffer.extend(pre_roll_buffer)
                             audio_buffer.extend(audio_chunk_flattened)
@@ -175,6 +187,12 @@ class Ear:
                             logits = self.turn_session.run(None, ort_inputs)[0]
                             complete_prob = 1.0 / (1.0 + np.exp(-float(np.squeeze(logits))))
                             
+                            # --- UI TELEMETRY HOOK ---
+                            try: 
+                                import eel
+                                eel.update_telemetry_detailed("ear", "Awaiting Turn End...", "#f9e2af", f"Conf: {complete_prob:.2f}") 
+                            except Exception: pass
+                            
                             if complete_prob >= self.turn_threshold:
                                 print(f"  └─ Turn Complete (Conf: {complete_prob:.2f})")
                                 break
@@ -195,14 +213,19 @@ class Ear:
         with lock:
             state["recording_active"] = False
             
-        worker_thread.join(timeout=0.5)  # GPU Whisper finishes well within 500ms
+        # --- UI TELEMETRY HOOK ---
+        try: 
+            import eel
+            eel.update_telemetry_detailed("ear", "Transcribing...", "#a78bfa", "Finalizing Text") 
+        except Exception: pass
+        
+        worker_thread.join(timeout=0.5) 
         
         with lock:
             final_text = current_transcription[0]
             silence_start_ts = state["physical_silence_start_time"]
             audio_snapshot_final = np.array(audio_buffer, dtype=np.float32).flatten()
 
-        # Safety net: if background worker didn't finish in time, transcribe synchronously
         if not final_text.strip() and len(audio_snapshot_final) > 0:
             print("[Ear] Background transcription incomplete — running final pass...")
             try:

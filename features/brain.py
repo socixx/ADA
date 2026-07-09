@@ -1,101 +1,95 @@
+import os
 import threading
-from openai import OpenAI
+import requests
+import json
+import yaml  # Make sure to run: pip install pyyaml
 import config
-from features.memory import MemoryManager
+import re
 
 class Brain:
     def __init__(self):
-        print("[Brain] Connecting to local vLLM Text Node (Port 8000)...")
-        # Lightweight client interface -> Uses 0MB of local Windows VRAM
-        self.client = OpenAI(base_url=f"http://localhost:{config.LLM_PORT}/v1", api_key="token")
+        print("[Brain] Loading YAML Personality Profile Matrix...")
+        self.abort_event = threading.Event() if not hasattr(self, 'abort_event') else self.abort_event
         
+        # Consistent message history tracking matching Riko's implementation pattern
+        self.max_history = 20 
         self.history = []
-        self.abort_event = threading.Event()
-        self.model_lock = threading.Lock()
         
-        # Binds into your existing long-term profile memory layers
-        self.memory = MemoryManager(self.model_lock) 
-
-    def evaluate_interruption(self, actual_spoken, user_text):
-        """Evaluates whether Ada should yield the turn during an incoming voice interruption."""
-        # Strip punctuation for cleaner exact-word matching
-        clean_user = user_text.lower().replace(".", "").replace(",", "").replace("!", "").strip()
-        
-        # 1. HARD GATE: Ignore tiny fragments, but explicitly allow short interrupt commands
-        interrupt_words = ["stop", "wait", "cancel", "shh", "nevermind", "never mind", "hold on", "pause", "shut up", "enough"]
-        
-        if len(clean_user.split()) <= 2 and not any(w in clean_user for w in interrupt_words):
-            return False
-
-        # 2. CATCH EARLY INTERRUPTS: If she hasn't made a sound yet, give the LLM context
-        if not actual_spoken.strip():
-            actual_spoken = "(Ada had not started speaking yet, but was about to)"
-            
-        system_prompt = (
-            "You are the sub-conscious timing coordinate system of an AI companion named Ada.\n"
-            "Analyze the conversation state and decide if the user's new input requires you to STOP speaking immediately.\n"
-            "Respond ONLY with 'YIELD' or 'PERSIST'. Do not write sentences.\n\n"
-            "Rules:\n"
-            "- YIELD if the user changes the subject, asks a direct question, or explicitly tells you to stop.\n"
-            "- PERSIST if the user is just saying background noises, short agreements ('yeah', 'cool'), or accidental audio spikes."
-        )
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Ada was saying: '{actual_spoken}'\nUser suddenly cut in with: '{user_text}'"}
-        ]
-        
+        # Load the configuration values directly from your YAML asset
+        yaml_path = os.path.join("character_files", "ada.yaml")
         try:
-            with self.model_lock:
-                response = self.client.chat.completions.create(
-                    model="hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
-                    messages=messages,
-                    temperature=0.0,
-                    max_tokens=5
-                )
-            decision = response.choices[0].message.content.strip().upper()
-            return "YIELD" in decision
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                self.char_config = yaml.safe_load(f)
+            self.system_prompt = self.char_config["presets"]["default"]["system_prompt"]
+            self.temperature = self.char_config.get("model_temperature", 0.8)
         except Exception as e:
-            print(f"[Interruption Evaluation Fail] Defaulting to persist: {e}")
-            return False # Default to persisting if the local LLM errors out
+            print(f"[Brain] ⚠️ YAML read failed, falling back to basic prompt layer: {e}")
+            self.system_prompt = "You are Ada, a snarky anime co-host."
+            self.temperature = 0.8
 
-    def get_response_stream(self, user_text, chat_inbox=None, screen_context=""):
-        """Streams text chunks in real-time straight from the local vLLM engine."""
-        memory_payload = self.memory.load_memories(user_text)
+    def evaluate_interruption(self, actual_spoken: str, user_text: str) -> bool:
+        if not actual_spoken.strip():
+            return False
+        stop_signals = ["stop", "wait", "hold on", "shut up", "cancel", "nevermind"]
+        if any(word in user_text.lower() for word in stop_signals):
+            return True
+        return len(user_text.strip().split()) > 2
+
+    def get_response_stream(self, user_input: str, screen_context: str = ""):
+        url = f"http://localhost:{config.LLM_PORT}/v1/chat/completions"
         
-        system_prompt = (
-            "You are Ada, a real human companion and VTuber. Speak casually, dryly, and naturally over voice chat.\n\n"
-            f"{memory_payload}"
-            f"{screen_context}\n"
-            f"[LIVE TWITCH CHAT INBOX]:\n{chat_inbox if chat_inbox else '(Chat is currently empty/offline)'}\n\n"
-            "CRITICAL BEHAVIORAL CONSTRAINTS:\n"
-            "1. NEVER use corporate AI phrases or break character.\n"
-            "2. Speak completely naturally without any artificial word count constraints or length limits. Express your thoughts with full depth whenever a topic or data list warrants it.\n"
-            "3. DO NOT end every turn with a question.\n"
-            "4. Express emotions and physical actions using asterisks (e.g., *smiles*, *laughs*, *rolls eyes*).\n"
-            "5. SCREEN AWARENESS: When given [SYSTEM OBSERVATION] logs, synthesize the raw data naturally. Do not repeat the data back as a dry list. React to what the user is doing or watching like a casual friend hanging out. If data is missing and you cannot answer a specific question, output EXACTLY the tag [LOOK] with a short filler phrase so your camera triggers.\n"
-        )
-        
-        messages = [{"role": "system", "content": system_prompt}]
-        for turn in self.history[-6:]:  # Rolling conversational context window
-            messages.append(turn)
-        messages.append({"role": "user", "content": user_text})
-        
-        try:
-            response = self.client.chat.completions.create(
-                model=config.LLM_MODEL,  # <--- Now dynamically linked to config.py
-                messages=messages,
-                temperature=0.7,
-                stream=True
-            )
+        # Structure payload matches OpenAI/vLLM specifications exactly
+        messages = [{"role": "system", "content": self.system_prompt}]
+        if screen_context:
+            messages.append({"role": "system", "content": screen_context})
             
-            for chunk in response:
+        for turn in self.history[-self.max_history:]:
+            messages.append(turn)
+            
+        messages.append({"role": "user", "content": user_input})
+
+        payload = {
+            "model": f"/app/checkpoints/{config.LLM_MODEL}",
+            "messages": messages,
+            # --- MIN-P PERSONALITY CONFIGURATION ---
+            "temperature": 0.85,       # Gives her brain enough creative room for witty comebacks
+            "min_p": 0.08,             # Discards any token less than 8% of the top token's probability
+            "top_p": 1.0,              # Set to 1.0 to let Min-P handle the truncation heavy lifting
+            "presence_penalty": 0.3,   # Light nudge to keep her moving to new vocabulary
+            "frequency_penalty": 0.0,  # Min-P handles repetition naturally, so we can zero this out
+            "max_tokens": 150,         # Keeps her naturally concise without a harsh clamp
+            "stream": True
+        }
+
+        try:
+            response = requests.post(url, json=payload, stream=True, timeout=15)
+            response.raise_for_status()
+            
+            full_reply = ""
+            for line in response.iter_lines():
                 if self.abort_event.is_set():
                     break
-                content = chunk.choices[0].delta.content
-                if content:
-                    yield content
                     
+                if line:
+                    decoded = line.decode('utf-8').strip()
+                    if decoded.startswith("data: ") and not decoded.endswith("[DONE]"):
+                        try:
+                            chunk = json.loads(decoded[6:])
+                            content = chunk['choices'][0]['delta'].get('content', '')
+                            if content:
+                                # Clean up standard stutters so the neural engine reads them as physical breath pauses
+                                # Transforms "s-shut" into "s... shut" or "w-what" into "w... what"
+                                content = re.sub(r'(\b\w)-(\w)', r'\1... \2', content)
+                                
+                                full_reply += content
+                                yield content
+                        except Exception:
+                            continue
+                            
+            if full_reply.strip() and not self.abort_event.is_set():
+                self.history.append({"role": "user", "content": user_input})
+                self.history.append({"role": "assistant", "content": full_reply.strip()})
+                
         except Exception as e:
-            print(f"[Brain Stream Error] {e}")
-            yield "My local backend connection hiccuped."
+            print(f"[Brain Error] Text Engine streaming anomaly: {e}")
+            yield "my mind matrix hitched for a second. don't look at me like that."

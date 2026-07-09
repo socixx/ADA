@@ -4,23 +4,25 @@ import pyvts
 import os
 
 class VTSBridge:
-    def __init__(self, port=8001):
+    def __init__(self, port=8006):
         print(f"[Model-Engine] Initializing VTube Studio Bridge on port {port}...")
         
-        # Ensure the memory directory exists for the auth token
-        os.makedirs("./memory", exist_ok=True)
+        # Ensure the directory exists
+        os.makedirs("./character_files", exist_ok=True)
+        
+        # CHANGED: Target location redirected explicitly into character_files/
+        token_path = "./character_files/vts_token.txt"
         
         plugin_info = {
-            "plugin_name": "Ada Core AI",
-            "developer": "Ada Core Pipeline",
-            "authentication_token_path": "./memory/vts_token.txt"
+            "plugin_name": "Ada Intelligence Engine",
+            "developer": "Ada Core",
+            "authentication_token_path": token_path
         }
         
         self.vts = pyvts.vts(plugin_info=plugin_info, port=port)
         self.connected = False
         self.hotkeys = []
         
-        # Spawn dedicated thread for the VTS asyncio loop
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._start_loop, daemon=True)
         self.thread.start()
@@ -37,30 +39,37 @@ class VTSBridge:
         try:
             await self.vts.connect()
             
-            # 1. Try to read the token and authenticate silently
-            try:
-                await self.vts.read_token()
-                await self.vts.request_authenticate()
-            except Exception:
-                # 2. If it fails (no file, or invalid token), request a new one
-                print("[Model-Engine] Token missing or invalid. Please click 'Allow' inside VTube Studio...")
-                
-                # This line triggers the actual popup in the VTube Studio UI
-                await self.vts.request_authenticate_token()
-                
-                # Save the new token for next time
-                await self.vts.write_token()
-                
-                # Authenticate with the newly granted token
-                await self.vts.request_authenticate()
+            # Enforce hardcoded token route inside pyvts handler references
+            token_path = "./character_files/vts_token.txt"
+            self.vts.vts_request.authentication_token_path = token_path
             
-            self.connected = True
+            # 1. Look for your custom pasted token file
+            if os.path.exists(token_path):
+                print(f"[Model-Engine] Found manual token file at {token_path}. Authenticating...")
+                await self.vts.read_token()
+                try:
+                    await self.vts.request_authenticate()
+                    self.connected = True
+                except Exception:
+                    print("[Model-Engine] Token rejected by VTS (403). Resetting cache target...")
+                    os.remove(token_path)
+                    self.connected = False
+            
+            # 2. Fallback request prompt if token gets invalidated or file is absent
+            if not self.connected:
+                print("\n" + "="*50)
+                print("[Model-Engine] REQUESTING FRESH ACCESS PAIR!")
+                print("[Model-Engine] PLEASE CLICK 'ALLOW' INSIDE VTUBE STUDIO NOW.")
+                print("="*50 + "\n")
+                
+                await self.vts.request_authenticate_token()
+                await self.vts.write_token()
+                await self.vts.request_authenticate()
+                self.connected = True
+            
             print("[Model-Engine] ✅ Successfully authenticated with VTube Studio!")
             
-            # 3. Fetch all available hotkeys/expressions from the currently loaded model
             response = await self.vts.request(self.vts.vts_request.requestHotKeyList())
-            
-            # Safely extract hotkeys to prevent future KeyErrors
             self.hotkeys = response.get('data', {}).get('availableHotkeys', [])
             print(f"[Model-Engine] Loaded {len(self.hotkeys)} hotkeys from current model.")
             
@@ -68,21 +77,13 @@ class VTSBridge:
             print(f"[Model-Engine] 🛑 Authentication failed: {e}")
 
     def trigger_action(self, action_text: str):
-        """
-        Synchronous method called by main.py.
-        Fires an async websocket request to VTS.
-        """
-        if not self.connected:
-            return
-            
+        if not self.connected: return
         clean_action = action_text.lower().strip()
         print(f"\n[Model-Engine] ✨ Triggering expression: *{clean_action}*")
-        
         asyncio.run_coroutine_threadsafe(self._async_trigger(clean_action), self.loop)
 
     async def _async_trigger(self, action_text: str):
         target_hotkey = None
-        # Naive matching: if the LLM action word is in the VTS hotkey name, or vice versa
         for hk in self.hotkeys:
             hk_name = hk['name'].lower()
             if action_text in hk_name or hk_name in action_text:
@@ -91,5 +92,3 @@ class VTSBridge:
                 
         if target_hotkey:
             await self.vts.request(self.vts.vts_request.requestTriggerHotKey(target_hotkey))
-        else:
-            pass # Fail silently if she hallucinates an action you don't have a hotkey for
