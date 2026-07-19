@@ -2,6 +2,7 @@
 window.globalRunData = [];
 let SYSTEM_PRESETS = [];
 let selectedPresetIndex = 0;
+let snapshotDecayTimer = null;
 
 // Initialize and pull the regression matrix from the root directory via Eel
 window.addEventListener("DOMContentLoaded", () => {
@@ -15,11 +16,14 @@ window.addEventListener("DOMContentLoaded", () => {
             console.error("Failed to load regression_suite.json from root:", response ? response.error : "Unknown error");
             alert("Warning: regression_suite.json not found in root directory.");
         }
+    });
+
     // Request initial state from backend after allowing the websocket to stabilize
     setTimeout(() => { 
-        eel.ui_request_status_sync()(); 
+        if (typeof eel.ui_request_status_sync === "function") {
+            eel.ui_request_status_sync()(); 
+        }
     }, 1000); 
-});
 
     // Existing settings loader...
     eel.ui_get_current_settings()(function(data) {
@@ -76,8 +80,8 @@ function switchTab(tabId) {
     let targetElement = document.getElementById(targetId);
     if(targetElement) targetElement.classList.add('active');
     
-    if (event && event.currentTarget) {
-        event.currentTarget.classList.add('active');
+    if (window.event && window.event.currentTarget) {
+        window.event.currentTarget.classList.add('active');
     }
 
     if (tabId === 'memory') eel.ui_fetch_memory()(renderMemory);
@@ -161,33 +165,134 @@ function saveConfigToDisk() {
 }
 
 eel.expose(update_chat);
-function update_chat(role, text, isNewTurn = true, msgId = null, msgType = "normal", thought = "") {
+function update_chat(role, text, isNewTurn = true, msgId = null, msgType = "normal", thought = "", isInterrupted = false, interruptScore = 0) {
     try {
         let chatBox = document.getElementById("chat-box");
         let existing = msgId ? document.getElementById(msgId) : null;
         
+        // --- 1. HANDLING UPDATES TO EXISTING STREAMING MESSAGES ---
         if (existing) {
             if (msgType !== "normal") existing.classList.add(msgType + "-bubble");
-            if (isNewTurn === false) existing.innerText += text;
-            else existing.innerText = text;
+            
+            if (role === "ada") {
+                // Ensure text goes into Ada's specific text span, ignoring the collapsible div
+                let txtSpan = existing.querySelector('.ada-text-content');
+                if (isNewTurn === false) {
+                    if (txtSpan) txtSpan.innerText += text;
+                    else existing.innerText += text;
+                } else {
+                    if (txtSpan) txtSpan.innerText = text;
+                    else existing.innerText = text;
+                }
+            } else {
+                // Standard text update for User and System
+                if (isNewTurn === false) existing.innerText += text;
+                else existing.innerText = text;
+            }
+            
+            // Fix: ONLY append the evaluator text if it's the user's message
+            if (role === "user" && thought && !existing.nextSibling?.classList.contains('evaluator-thought')) {
+                let t = document.createElement("div");
+                t.className = "evaluator-thought";
+                t.innerText = thought;
+                existing.parentNode.insertBefore(t, existing.nextSibling);
+            }
+
             chatBox.scrollTop = chatBox.scrollHeight;
             return;
         }
 
+        // --- 2. HANDLING BRAND NEW MESSAGES ---
         let div = document.createElement("div");
         if (msgId) div.id = msgId;
         
-        if (role === "ada") div.className = "bubble msg-ada";
-        else if (role === "user") div.className = "bubble msg-user";
-        else div.className = "bubble msg-system";
+        if (role === "ada") {
+            div.className = "bubble msg-ada collapsible-console-turn" + (isInterrupted ? " msg-interrupted" : "");
+            
+            // Hide Ada's payload inside the collapsible block
+            let cleanThought = thought ? thought.replace(/\[\/END SYSTEM DIRECTIVE\]/g, '').trim() : "System Context Baseline Sync Pass.";
+            
+            div.innerHTML = `
+                <div class="ada-text-content" style="line-height: 1.6;">${text}</div>
+                <div class="console-prompt-unfold">
+                    <div class="cpu-header">Inbound Context Payload</div>
+                    <pre class="cpu-body">${cleanThought}</pre>
+                </div>
+            `;
+            
+            if (isInterrupted && interruptScore > 0) {
+                const badge = document.createElement("div");
+                badge.className = "interruption-badge";
+                badge.innerText = `[STREAM HALTED // CONFIDENCE: ${interruptScore.toFixed(2)}]`;
+                div.appendChild(badge);
+            }
+            
+            div.addEventListener('click', function(e) {
+                if (window.getSelection().toString()) return;
+                let unfoldBlock = this.querySelector('.console-prompt-unfold');
+                if (unfoldBlock) {
+                    unfoldBlock.classList.toggle('active');
+                }
+            });
+            
+        } else if (role === "user") {
+            div.className = "bubble msg-user";
+            if (msgType === "backchannel") div.classList.add("backchannel-bubble");
+            if (msgType === "interruption") div.classList.add("interruption-bubble");
+            div.innerText = text;
+        } else {
+            div.className = "bubble msg-system";
+            div.innerText = text;
+        }
         
-        div.innerText = text;
         chatBox.appendChild(div);
+
+        // Fix: Catch thoughts sent on new user turn initialization
+        if (role === "user" && thought) {
+            let t = document.createElement("div");
+            t.className = "evaluator-thought";
+            t.innerText = thought;
+            chatBox.appendChild(t);
+        }
+
         chatBox.scrollTop = chatBox.scrollHeight;
     } catch (e) {
         console.error("DOM Update Error:", e);
     }
 }
+
+// ==================================================
+// CONSOLE MANUAL TEXT PASS-THROUGH HANDLER
+// ==================================================
+function submitConsoleTextInput() {
+    const inputField = document.getElementById("console-text-input");
+    if (!inputField) return;
+    
+    const rawText = inputField.value.trim();
+    if (!rawText) return;
+
+    // Call your backend cognitive engine loop directly as if it was processed by the audio system
+    if (typeof eel.ui_submit_text_input === "function") {
+        eel.ui_submit_text_input(rawText);
+    } else {
+        console.warn("Backend hook 'eel.ui_submit_text_input' not found.");
+    }
+
+    // Clear the field instantly to accept the next query
+    inputField.value = "";
+}
+
+// Bind the Enter key to automatically submit the form field without clicking the button
+window.addEventListener("DOMContentLoaded", () => {
+    const field = document.getElementById("console-text-input");
+    if (field) {
+        field.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+                submitConsoleTextInput();
+            }
+        });
+    }
+});
 
 eel.expose(update_telemetry_detailed);
 function update_telemetry_detailed(engineName, statusText, colorHex, statsText) {
@@ -206,9 +311,6 @@ function triggerSystemCoreShutdown() {
     }
 }
 
-// ==================================================
-// RADICALLY UPGRADED GRID SHOWCASE & QUALITY GRADER PIPELINE
-// ==================================================
 function setHeroState(state, title, subtitle) {
     let hero = document.getElementById("bench-hero");
     let t = document.getElementById("hero-main-title");
@@ -258,13 +360,11 @@ function animateHeroProgress(callback) {
     }, 250);
 }
 
-// SINGLE CONSOLIDATED RENDERER: Combines Macro Math + Detailed Performance Panels
 function renderVisualTelemetryShowcase(runsArray) {
     let panel = document.getElementById("metrics-view-panel");
     panel.innerHTML = "";
     if (!runsArray || runsArray.length === 0) return;
 
-    // 1. Calculate Overall Suite Averages
     let totalTPS = 0, totalTTFT = 0, totalRTF = 0;
     let totalPipelineTime = 0, totalGenerationTime = 0, totalTokens = 0, totalPromptTokens = 0, totalCtxTokensFound = 0;
     let totalVisionTime = 0, totalVectorTime = 0, totalShortTermTokens = 0, totalKvCache = 0;
@@ -297,11 +397,9 @@ function renderVisualTelemetryShowcase(runsArray) {
     let avgRTF = (totalRTF / numRuns).toFixed(3);
     let avgTPOT = totalTokens > 0 ? (totalGenerationTime / totalTokens).toFixed(4) : "0.0000";
 
-    // Grab evaluations from the final run (which stores the macro grades)
     let finalRun = runsArray[runsArray.length - 1];
     let evalStatusCode = finalRun.evaluation?.status_code || "UNKNOWN";
 
-    // 2. RENDER THE TOP HIGHLIGHT MINI DASHBOARD
     let summaryHtml = `
     <div class="summary-dashboard-grid">
         <div class="summary-mini-card">
@@ -320,7 +418,6 @@ function renderVisualTelemetryShowcase(runsArray) {
     
     panel.innerHTML += summaryHtml;
 
-    // Helper to build collapsible/static panels
     function buildPanel(title, rows, isCollapsible = false) {
         let rowsHtml = rows.map(r => `
             <div class="tg-row">
@@ -345,7 +442,6 @@ function renderVisualTelemetryShowcase(runsArray) {
         </div>`;
     }
 
-    // 3. RESTORED & AVERAGED: CORE COMPUTE & MEMORY SPOOLS (Made Collapsible)
     panel.innerHTML += buildPanel("CORE COMPUTE & MEMORY SPOOLS (SUITE AVERAGES)", [
         { label: "Total Interconnect Loop Duration", value: (totalPipelineTime / numRuns).toFixed(4) + " s", class: "blue-metric" },
         { label: "System Loop Status Return Code", value: evalStatusCode, class: evalStatusCode === "COMPLETED_RUN" ? "success-text" : "danger-text" },
@@ -356,7 +452,6 @@ function renderVisualTelemetryShowcase(runsArray) {
         { label: "Long-Term Associated Blocks Found", value: (totalCtxTokensFound / numRuns).toFixed(0) + " keys", class: "blue-metric" }
     ], true);
 
-    // 4. RESTORED & AVERAGED: VLLM & AUDIO DSP TELEMETRY MATRICES (Made Collapsible)
     panel.innerHTML += buildPanel("VLLM & AUDIO DSP TELEMETRY MATRICES (SUITE AVERAGES)", [
         { label: "Pure Token Generation Duration", value: (totalGenerationTime / numRuns).toFixed(4) + " s", class: "blue-metric" },
         { label: "Time Per Output Token (TPOT)", value: avgTPOT + " s/token", class: "blue-metric" },
@@ -367,7 +462,6 @@ function renderVisualTelemetryShowcase(runsArray) {
         { label: "Signal Processing Audio Sample Count", value: (totalTtsSamples / numRuns).toFixed(0) + " samples", class: "blue-metric" }
     ], true);
 
-    // 5. RENDER THE DOMAIN-SPECIFIC CATEGORY MATRICES WITH DIAGNOSTIC PILLS
     if (finalRun.quality_scores && finalRun.quality_scores.category_data) {
         let cats = finalRun.quality_scores.category_data;
         let catHtml = `<div class="telemetry-group-panel">
@@ -386,7 +480,6 @@ function renderVisualTelemetryShowcase(runsArray) {
             let statusText = totalFlags === 0 ? "SYS_STABLE" : `[${totalFlags}] FAULTS`;
             let cleanKey = key.replace(/_/g, ' ').toUpperCase();
 
-            // Construct explicit descriptive problem messages based on mapped counts
             let flagsList = [];
             if (cData.ttftFailures > 0) flagsList.push(`TTFT Exceeded (${cData.ttftFailures}/${cData.count} runs > 400ms)`);
             if (cData.rtfFailures > 0) flagsList.push(`Audio Latency Trip (${cData.rtfFailures}/${cData.count} runs RTF > 0.10)`);
@@ -430,7 +523,6 @@ function renderVisualTelemetryShowcase(runsArray) {
                     </div>
                 </div>
 
-                <!-- DETAILED METRIC FAULT DESCRIPTIONS -->
                 <div style="margin-bottom: 12px; display: flex; flex-wrap: wrap;">
                     ${flagPills}
                 </div>
@@ -452,7 +544,6 @@ function renderVisualTelemetryShowcase(runsArray) {
         panel.innerHTML += catHtml;
     }
 
-    // 6. OVERALL SUITE VERDICT
     if (finalRun.quality_scores) {
         let q = finalRun.quality_scores;
         panel.innerHTML += buildPanel("MACRO SUITE POST-EXECUTION ANALYTICS", [
@@ -464,9 +555,6 @@ function renderVisualTelemetryShowcase(runsArray) {
     }
 }
 
-// ==================================================
-// ADVANCED MULTI-STEP CATEGORICAL GRADING ENGINE
-// ==================================================
 function computeQualityScores(runs) {
     if (!runs || runs.length === 0) return null;
 
@@ -476,15 +564,9 @@ function computeQualityScores(runs) {
     let totalSlaViolations = 0;
     let totalFunctionalFailures = 0;
 
-    const BUDGETS = {
-        max_ttft: 0.400,          
-        max_tts_rtf: 0.100,       
-        min_tps: 95.0             
-    };
-
+    const BUDGETS = { max_ttft: 0.400, max_tts_rtf: 0.100, min_tps: 95.0 };
     let categories = {};
 
-    // First Pass: Initialize data structures with counter tracking arrays
     runs.forEach(run => {
         let cat = run.category || "Uncategorized_Test";
         if (!categories[cat]) {
@@ -511,13 +593,11 @@ function computeQualityScores(runs) {
         let runSlaViolations = 0;
         let runFuncFailures = 0;
 
-        // --- EVALUATE LATENCY & THROUGHPUT BUDGETS ---
         if (latencies.ttft > BUDGETS.max_ttft) { runSLA -= 3.5; runSlaViolations++; categories[cat].ttftFailures++; }
         if (acoustics.tts_rtf > BUDGETS.max_tts_rtf) { runSLA -= 2.5; runSlaViolations++; categories[cat].rtfFailures++; }
         if (mlMetrics.tps < BUDGETS.min_tps) { runSLA -= 4.0; runSlaViolations++; categories[cat].tpsFailures++; }
         runSLA = Math.max(0, runSLA);
 
-        // --- EVALUATE FUNCTIONAL INTEGRITY ---
         let semanticScore = evaluation.target_convergence_accuracy || 0.0;
         if (semanticScore < 7.0) {
             runFunctional -= (10.0 - semanticScore); 
@@ -532,14 +612,12 @@ function computeQualityScores(runs) {
         }
         runFunctional = Math.max(0, runFunctional);
 
-        // --- EVALUATE CONTEXT STABILITY ---
         if (mlMetrics.prediction_entropy > 0.70 && mlMetrics.context_tokens_found === 0) {
             runContext -= 5.0;
             categories[cat].entropyFailures++;
         }
         runContext = Math.max(0, runContext);
 
-        // --- AGGREGATE CORE STATS ---
         categories[cat].count++;
         categories[cat].totalTPS += (mlMetrics.tps || 0);
         categories[cat].totalTTFT += (latencies.ttft || 0);
@@ -595,13 +673,12 @@ function runSingleBenchmark() {
                 targetPreset.prompt_text, 
                 "Suite Auto-Run", 
                 targetPreset.target_mock,
-                targetPreset.category // Pass the category to Python
+                targetPreset.category
             )(function(response) {
                 if(!response.error) {
                     response.category = targetPreset.category; 
-                    // Quick render for single run
                     let mockArray = [response];
-                    window.globalRunData = mockArray; // Inject to global modal array
+                    window.globalRunData = mockArray; 
                     mockArray[0].quality_scores = computeQualityScores(mockArray);
                     renderVisualTelemetryShowcase(mockArray);
                 }
@@ -618,13 +695,9 @@ function runSequentialTestSuite() {
     
     function runNext() {
         if(currentIndex >= SYSTEM_PRESETS.length) {
-            // End of Suite: Trigger macro evaluation pass to grade all combined outputs
-            window.globalRunData = suiteResults; // Inject to global modal array
+            window.globalRunData = suiteResults; 
             let coreGrades = computeQualityScores(suiteResults);
-            
-            // Apply evaluation pass to final item for showcase representation
             suiteResults[suiteResults.length - 1].quality_scores = coreGrades;
-            
             renderVisualTelemetryShowcase(suiteResults);
             setHeroState("success", `${SYSTEM_PRESETS.length}-Preset Test Suite Complete`, "All responses collected. Macro grading evaluation pass completed successfully.");
             alert("Sequential suite execution complete. Graded output logs written.");
@@ -640,10 +713,9 @@ function runSequentialTestSuite() {
                 targetPreset.prompt_text, 
                 "Suite Auto-Run", 
                 targetPreset.target_mock,
-                targetPreset.category // Pass the category to Python
+                targetPreset.category
             )(function(response) {
                 if(!response.error) {
-                    // Re-attach the category from the local preset array
                     response.category = targetPreset.category; 
                     suiteResults.push(response);
                 }
@@ -656,23 +728,16 @@ function runSequentialTestSuite() {
     runNext();
 }
 
-// ==================================================
-// MODAL CONTROLLERS & DATA INJECTION
-// ==================================================
 function openDiagnosticsModal(categoryName) {
     const modal = document.getElementById('diagnostics-modal');
     const title = document.getElementById('modal-category-title');
     const body = document.getElementById('modal-body');
     
     title.innerText = categoryName.replace(/_/g, ' ').toUpperCase();
-    
-    // Filter the raw runs that belong specifically to this category
     const relevantRuns = window.globalRunData.filter(r => (r.category || "Uncategorized_Test") === categoryName);
-    
     document.getElementById('modal-category-subtitle').innerText = `Batch Load: ${relevantRuns.length} EXECUTIONS`;
     
     let htmlContent = "";
-    
     relevantRuns.forEach((run, index) => {
         let l = run.system_latencies || {};
         let m = run.ml_load_metrics || {};
@@ -693,7 +758,6 @@ function openDiagnosticsModal(categoryName) {
             </div>
             
             <div class="run-grid">
-                <!-- LATENCY & COMPUTE -->
                 <div class="data-panel">
                     <div class="data-panel-title">System Latencies</div>
                     <div class="data-row"><span class="data-label">Time To First Token</span><span class="data-value">${(l.ttft || 0).toFixed(3)}s</span></div>
@@ -706,7 +770,6 @@ function openDiagnosticsModal(categoryName) {
                     </div>
                 </div>
 
-                <!-- LLM & ML METRICS -->
                 <div class="data-panel">
                     <div class="data-panel-title">Machine Learning Load</div>
                     <div class="data-row"><span class="data-label">Velocity (TPS)</span><span class="data-value" style="color: #a6e3a1;">${m.tps || 0} t/s</span></div>
@@ -717,7 +780,6 @@ function openDiagnosticsModal(categoryName) {
                 </div>
             </div>
 
-            <!-- I/O TEXT DUMPS -->
             <div style="margin-top: 15px;">
                 <div class="data-panel-title">Input Prompt</div>
                 <div class="text-dump">${p.prompt_text || "No prompt recorded."}</div>
@@ -747,29 +809,53 @@ function closeDiagnosticsModal() {
 // ==================================================
 // RESTORED CORE SENSORY & TELEMETRY HOOKS
 // ==================================================
-
 eel.expose(update_telemetry);
 function update_telemetry(engineName, statusText, colorHex) {
-    // Re-routes standard telemetry calls to your detailed handler
     update_telemetry_detailed(engineName, statusText, colorHex, "");
 }
 
 eel.expose(update_state);
 function update_state(statusText, colorHex) {
-    // Usually tied to the ear/listening state in the pipeline
     update_telemetry_detailed("ear", statusText, colorHex, "");
 }
 
+// ==================================================
+// SYSTEM TELEMETRY ISOLATION & ACCURATE SNAPSHOT TIMER
+// ==================================================
 eel.expose(update_vision_live);
 function update_vision_live(dataText) {
-    let el = document.getElementById("vision-live"); // Fixed ID match
-    if (el) el.innerText = dataText;
+    if (!dataText) return;
+    
+    const lines = dataText.split('\n');
+    lines.forEach(line => {
+        if (line.startsWith("App   :")) {
+            document.getElementById("live-app-val").innerText = line.replace("App   :", "").trim();
+        } else if (line.startsWith("Hover :")) {
+            document.getElementById("live-hover-val").innerText = line.replace("Hover :", "").trim();
+        } else if (line.startsWith("OCR   :")) {
+            document.getElementById("live-ocr-val").innerText = line.replace("OCR   :", "").trim();
+        } else if (line.startsWith("Audio :")) {
+            document.getElementById("live-audio-val").innerText = line.replace("Audio :", "").trim();
+        } else if (line.startsWith("Scene :")) {
+            document.getElementById("live-scene-val").innerText = line.replace("Scene :", "").trim();
+        }
+    });
 }
 
 eel.expose(update_vision_snapshot);
 function update_vision_snapshot(dataText) {
-    let el = document.getElementById("vision-snapshot"); // Matches HTML perfectly
-    if (el) el.innerText = dataText;
+    let el = document.getElementById("vision-snapshot");
+    if (!el) return;
+    
+    el.innerText = dataText;
+    
+    if (snapshotDecayTimer) {
+        clearTimeout(snapshotDecayTimer);
+    }
+    
+    snapshotDecayTimer = setTimeout(() => {
+        el.innerText = "Idle.";
+    }, 10000); 
 }
 
 eel.expose(update_vision_card);

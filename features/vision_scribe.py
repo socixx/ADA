@@ -15,7 +15,7 @@ from winrt.windows.storage.streams import InMemoryRandomAccessStream
 # ---------------------------------------------
 import asyncio
 import mss
-from PIL import Image
+from PIL import Image, ImageOps
 import io
 
 class VisionScribe:
@@ -54,23 +54,17 @@ class VisionScribe:
         try:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-            from PIL import Image
-            import mss
             
             # Load the lightweight 1.8B model into fp16 on the GPU
             model_id = "vikhyatk/moondream2"
             revision = "2024-08-26"
             
             tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision)
-            
-            # --- THE ULTIMATE INTERCEPTION ---
-            # 1. Load the configuration object separately FIRST
             config = AutoConfig.from_pretrained(model_id, trust_remote_code=True, revision=revision)
             
-            # 2. Hard-patch the missing token into the config BEFORE the model ever sees it
+            # Hard-patch the missing token into the config BEFORE the model ever sees it
             config.pad_token_id = tokenizer.eos_token_id
             
-            # 3. Boot the model using our pre-patched config!
             model = AutoModelForCausalLM.from_pretrained(
                 model_id, 
                 config=config, 
@@ -79,7 +73,14 @@ class VisionScribe:
                 torch_dtype=torch.float16, 
                 device_map={"": "cuda"}
             )
-            # ---------------------------------
+            
+            # GROUNDING PROMPT DIRECTIVE: Force the model to be completely literal
+            vision_prompt = (
+                "You are an objective computer vision engine tracking a user's desktop workspace. "
+                "Describe ONLY the actual, literal software interface contents visible on the monitor screen. "
+                "Identify specific open window panels, simulator layouts, menus, buttons, text fields, and active video components. "
+                "Do not invent scenery, outdoor environments, background themes, or narratives. Be completely literal."
+            )
             
             with mss.mss() as sct:
                 while not self.stop_event.is_set():
@@ -87,13 +88,20 @@ class VisionScribe:
                         # Grab the primary monitor
                         monitor = sct.monitors[1]
                         sct_img = sct.grab(monitor)
-                        img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+                        raw_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
                         
-                        # Generate the broad scene caption
-                        enc_image = model.encode_image(img)
-                        caption = model.answer_question(enc_image, "Describe this scene accurately and concisely.", tokenizer)
+                        # --- ASPECT RATIO PRESERVATION LAYOUT ---
+                        # Instead of squishing 16:9 into a square, add clean black padding
+                        max_dim = max(raw_img.size)
+                        pad_w = (max_dim - raw_img.size[0]) // 2
+                        pad_h = (max_dim - raw_img.size[1]) // 2
+                        padded_img = ImageOps.expand(raw_img, border=(pad_w, pad_h, pad_w, pad_h), fill="black")
+                        # --------------------------------------------------------
                         
-                        self.live_workspace_state["visual_scene"] = caption
+                        enc_image = model.encode_image(padded_img)
+                        caption = model.answer_question(enc_image, vision_prompt, tokenizer)
+                        
+                        self.live_workspace_state["visual_scene"] = caption.strip()
                     except Exception:
                         pass
                         
@@ -147,10 +155,7 @@ class VisionScribe:
             monitor = {"top": top, "left": left, "width": width, "height": height}
             sct_img = self.sct.grab(monitor)
             
-            # Convert to standard image format
             img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-            
-            # Write to a tiny, constantly overwritten temp file (cached in RAM by OS)
             temp_path = os.path.abspath(os.path.join(tempfile.gettempdir(), "ada_vision_buffer.png"))
             img.save(temp_path, format="PNG")
             
@@ -169,11 +174,9 @@ class VisionScribe:
             r = sr.Recognizer()
 
             with pyaudio.PyAudio() as p:
-                # 1. Locate the active default speakers
                 wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
                 default_speakers = p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
                 
-                # 2. Find the hidden WASAPI loopback channel for those exact speakers
                 loopback_device = None
                 for loopback in p.get_loopback_device_info_generator():
                     if default_speakers["name"] in loopback["name"]:
@@ -184,16 +187,14 @@ class VisionScribe:
                     self.live_workspace_state["desktop_audio"] = "[Loopback Device Not Found]"
                     return
 
-                # 3. Configure strict WASAPI hardware parameters
                 CHUNK = 4096
                 FORMAT = pyaudio.paInt16
                 CHANNELS = loopback_device["maxInputChannels"]
                 RATE = int(loopback_device["defaultSampleRate"])
-                RECORD_SECONDS = 4  # 4-second rolling transcription bursts
+                RECORD_SECONDS = 4  
 
                 while not self.stop_event.is_set():
                     try:
-                        # Open the raw byte stream
                         stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, 
                                         input=True, frames_per_buffer=CHUNK, 
                                         input_device_index=loopback_device["index"])
@@ -206,7 +207,6 @@ class VisionScribe:
                         stream.stop_stream()
                         stream.close()
 
-                        # Convert raw frames to an in-memory WAV file instantly
                         wav_io = io.BytesIO()
                         with wave.open(wav_io, 'wb') as wf:
                             wf.setnchannels(CHANNELS)
@@ -216,7 +216,6 @@ class VisionScribe:
                         
                         wav_io.seek(0)
 
-                        # Feed the clean memory file directly into the recognizer engine
                         with sr.AudioFile(wav_io) as source:
                             audio = r.record(source)
 
@@ -226,7 +225,7 @@ class VisionScribe:
                     except sr.UnknownValueError:
                         self.live_workspace_state["desktop_audio"] = "[Unintelligible / Music]"
                     except Exception:
-                        pass # Ignore transient drops between audio tracks
+                        pass 
                         
         except Exception as e:
             print(f"[Vision Scribe] Audio loopback failed: {e}")
@@ -239,15 +238,12 @@ class VisionScribe:
             from winrt.windows.graphics.imaging import BitmapDecoder
             from winrt.windows.storage import StorageFile
             
-            # 1. Native Windows File Read (0 = FileAccessMode.Read)
             file = await StorageFile.get_file_from_path_async(file_path)
             stream = await file.open_async(0) 
             
-            # 2. Decode the image natively
             decoder = await BitmapDecoder.create_async(stream)
             software_bitmap = await decoder.get_software_bitmap_async()
             
-            # 3. Run native OCR
             engine = OcrEngine.try_create_from_user_profile_languages()
             if not engine: 
                 return "[None]"
@@ -267,10 +263,7 @@ class VisionScribe:
                 self.live_workspace_state["active_app"] = app_name
                 self.live_workspace_state["window_title"] = title
                 
-                # UIAutomation Fallback chain
                 self.live_workspace_state["highlighted_text"] = self._get_uia_text()
-                
-                # Snaps targeted bounding box under mouse cursor using Win11 engine
                 self.live_workspace_state["attention_ocr"] = self._get_micro_ocr()
                 
             except Exception:
@@ -278,21 +271,23 @@ class VisionScribe:
             time.sleep(0.5)
 
     def get_ticker_text(self):
-        """Compiles the rolling state variables into an explicit, context-aware LLM prompt."""
+        """Compiles rolling state variables into an integrated cross-referenced prompt context."""
         state = self.live_workspace_state
         
         ticker = (
-            "\n[SYSTEM DIRECTIVE: LIVE SENSORY WORKSPACE STATE]\n"
-            "This is raw real-time data scraped from the user's PC screen and speakers. "
-            "CRITICAL RULES: \n"
-            "1. 'Desktop Audio' is background media (YouTube, Games, Spotify). It is NEVER the user speaking to you.\n"
-            "2. Do NOT assume you made, created, or own any of this content.\n"
-            "3. Only reference this data if it contextually answers the user's prompt (e.g. 'what is this song?', 'what am i watching?').\n"
-            f"- Active Window: {state['active_app']} (\"{state['window_title']}\")\n"
-            f"- UI Element under mouse: {state['highlighted_text']}\n"
-            f"- Visual OCR around mouse: {state.get('attention_ocr', '[None]')}\n"
-            f"- Desktop Audio Transcript: {state.get('desktop_audio', '[None]')}\n"
-            f"- Visual Scene: {state.get('visual_scene', '[None]')}\n" # <-- NEW
+            "\n[SYSTEM DIRECTIVE: DATA SENSORY FUSION MESH]\n"
+            "INSTRUCTION: You are an integrated multi-modal AI assistant tracking live environment metrics. "
+            "Use the telemetry streams below ONLY if they are contextually relevant to answering the user's prompt. "
+            "If the user is asking a general or conversational question, reply naturally without forcing visual descriptions or metadata into your answer.\n\n"
+            "ENVIRONMENT RULES:\n"
+            "1. 'Desktop Audio' represents background system media, not the user actively speaking to you.\n"
+            "2. Individuals or contents visible inside web browsers, video platforms, or streams are external MEDIA SUBJECTS.\n"
+            "3. Do NOT assume you created or own any of the contents displayed in this context.\n\n"
+            f"- Active Window Framework: {state.get('active_app', '[None]')} (\"{state.get('window_title', '[None]')}\")\n"
+            f"- UI Element Focused: {state.get('highlighted_text', '[None]')}\n"
+            f"- Live Text/OCR Bounding Box: {state.get('attention_ocr', '[None]')}\n"
+            f"- Desktop Audio Stream: {state.get('desktop_audio', '[None]')}\n"
+            f"- Visual Scene (Your Eyes): {state.get('visual_scene', '[None]')}\n" 
             "[/END SYSTEM DIRECTIVE]\n"
         )
         return ticker

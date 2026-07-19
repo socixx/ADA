@@ -45,6 +45,7 @@ eye_node = None
 ear_node = None
 active_llm_thread = None
 vision_scribe_node = None
+global_llm_worker = None
 
 # ==========================================
 # EEL UI EXPOSED FUNCTIONS (Bridge to JS)
@@ -359,7 +360,7 @@ def auto_log_turn_to_transcript(user_text, assistant_text):
         print(f"[Transcript System] Live-log failed: {e}")
 
 def background_vision_ui_worker():
-    """Runs continuously to pipe OS telemetry to the UI, independent of the AI."""
+    """Runs continuously to pipe OS telemetry and active vision context to the UI."""
     global vision_scribe_node
     while True:
         if vision_scribe_node:
@@ -367,11 +368,15 @@ def background_vision_ui_worker():
                 state = vision_scribe_node.live_workspace_state
                 audio_text = state.get('desktop_audio', '[Offline]')
                 
+                # Fetch what the Vision Scribe is parsing locally from your screen frame
+                live_visual_scene = state.get('visual_scene', '[Awaiting Vision Frame...]')
+                
                 live_ui = (
                     f"App   : {state['active_app']}\n"
                     f"Hover : {state['highlighted_text']}\n"
                     f"OCR   : {state.get('attention_ocr', '[None]')}\n"
-                    f"Audio : {audio_text}"
+                    f"Audio : {audio_text}\n"
+                    f"Scene : {live_visual_scene}" # Added live model tracking line
                 )
                 eel.update_vision_live(live_ui)
             except Exception:
@@ -382,7 +387,7 @@ def background_vision_ui_worker():
 # COGNITIVE LOOP 
 # ==========================================
 def cognitive_loop():
-    global brain_node, voice_node, vts_node, ear_node, active_llm_thread, vision_scribe_node
+    global brain_node, voice_node, vts_node, ear_node, active_llm_thread, vision_scribe_node, global_llm_worker
 
     # =========================================================================
     # THE LLM WORKER (Defined exactly ONCE, outside the loop)
@@ -390,6 +395,16 @@ def cognitive_loop():
     def llm_worker(text_to_process, visual_context, msg_id_for_ada, is_retry=False):
         try: eel.update_telemetry_detailed("llm", "Prompt Processing...", "#f9e2af", "") 
         except Exception: pass
+
+        # 1. BUILD THE EXACT FINAL STRING FED TO THE ENGINE
+        # This mirrors the true multi-modal prompt construction right at inference time
+        full_finalized_prompt = f"{visual_context}\n\n[USER PROMPT]: {text_to_process}"
+
+        # 2. INJECT INTO BOTH THE LIVE STREAM VIEW AND ACTIVE COGNITIVE SNAPSHOT
+        try: 
+            eel.update_vision_snapshot(f"Processing Full Pipeline Input:\n{full_finalized_prompt.strip()}")
+        except Exception: 
+            pass
 
         print("\n[ADA]: ", end="", flush=True)
 
@@ -444,8 +459,10 @@ def cognitive_loop():
                     speech_only = speech_only.replace("'", "").replace('"', '').strip()
                     
                     if len(speech_only) > 1:
-                        try: eel.update_chat("ada", speech_only + " ", is_first_sentence, msg_id_for_ada)
-                        except Exception: pass
+                        try: 
+                            eel.update_chat("ada", speech_only + " ", is_first_sentence, msg_id_for_ada, "normal", full_finalized_prompt)
+                        except Exception: 
+                            pass
 
                         if is_first_sentence: is_first_sentence = False
 
@@ -464,8 +481,10 @@ def cognitive_loop():
         if remaining_text:
             speech_only = re.sub(r'\*.*?\*', '', remaining_text).strip()
             if speech_only:
-                try: eel.update_chat("ada", speech_only + " ", is_first_sentence, msg_id_for_ada)
-                except Exception: pass
+                try: 
+                    eel.update_chat("ada", speech_only + " ", is_first_sentence, msg_id_for_ada, "normal", full_finalized_prompt)
+                except Exception: 
+                    pass
                 sentence_pool.append(speech_only)
 
         if sentence_pool:
@@ -483,6 +502,8 @@ def cognitive_loop():
         # Clear the active snapshot when she finishes speaking
         try: eel.update_vision_snapshot("Idle.")
         except: pass
+
+    global_llm_worker = llm_worker
 
 
     # =========================================================================
@@ -693,6 +714,48 @@ def main():
         except KeyboardInterrupt:
             print("\n[System] Keyboard Interrupt detected. Exiting interface loop smoothly (Containers left running).")
             os._exit(0)
+
+@eel.expose
+def ui_submit_text_input(manually_typed_text):
+    """Intercepts manual text fields submitted from the UI console panel bypass bar."""
+    # 1. ADD ada_state TO THE GLOBAL DECLARATION
+    global global_llm_worker, vision_scribe_node, ada_state
+    
+    if not manually_typed_text.strip():
+        return
+        
+    print(f"[Console Bypass Inbound]: {manually_typed_text}")
+    
+    import uuid
+    user_msg_id = f"msg_{uuid.uuid4().hex[:8]}"
+    eel.update_chat("user", manually_typed_text, True, user_msg_id, "normal", "Intent Match: Console Text Input Override -> Forced Execution.")
+    
+    if not global_llm_worker:
+        print("[Core Console Ingest Failure]: System loop has not finished initializing yet.")
+        eel.update_chat("system", "Error: Cognitive loop is initializing. Please wait.", True)
+        return
+
+    try:
+        base_visual_context = vision_scribe_node.get_ticker_text() if vision_scribe_node else ""
+        
+        typed_context_modifier = (
+            "[SYSTEM NOTICE: The user's input below was MANUALLY TYPED into your engineering override console dashboard. "
+            "It was not spoken over audio channels.]\n"
+        )
+        
+        combined_sensory_payload = base_visual_context + "\n" + typed_context_modifier
+        ada_response_id = f"msg_{uuid.uuid4().hex[:8]}"
+        
+        # 2. SET THE TURN LOCK SO THE WORKER THREAD DOES NOT TERMINATE ITSELF
+        ada_state["current_turn_id"] = ada_response_id
+        
+        threading.Thread(
+            target=global_llm_worker, 
+            args=(manually_typed_text, combined_sensory_payload, ada_response_id), 
+            daemon=True
+        ).start()
+    except Exception as e:
+        print(f"[Core Console Ingest Failure]: {e}")
 
 import time
 import json

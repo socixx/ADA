@@ -19,7 +19,7 @@ urllib3
 loguru
 pyyaml
 onnxruntime-gpu
-transformers
+transformers<4.48.0
 pywebview
 
 # ==============================================================================
@@ -30,6 +30,7 @@ PyAudioWPatch
 SpeechRecognition
 pynput
 numpy
+accelerate
 
 # ==============================================================================
 # 03. OS VISUAL SCREENCAP, CORE UI BINDINGS & COMPACT AI
