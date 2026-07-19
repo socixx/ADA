@@ -1,0 +1,54 @@
+# ==============================================================================
+# 01. CORE ORCHESTRATION & GRAPHICAL UI LINK
+# ==============================================================================
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+torch
+torchaudio
+torchvision
+faster-whisper
+openai
+psutil
+
+eel
+fastapi
+uvicorn
+requests
+httpx
+urllib3
+loguru
+pyyaml
+onnxruntime-gpu
+transformers
+pywebview
+
+# ==============================================================================
+# 02. NATIVE AUDIO CAPTURE, VAD & AUDIO HARDWARE
+# ==============================================================================
+sounddevice
+PyAudioWPatch
+SpeechRecognition
+pynput
+numpy
+
+# ==============================================================================
+# 03. OS VISUAL SCREENCAP, CORE UI BINDINGS & COMPACT AI
+# ==============================================================================
+mss
+Pillow
+pywin32
+uiautomation
+pyvts
+huggingface_hub
+fastembed
+
+# ==============================================================================
+# 04. WINDOWS 11 NATIVE DESKTOP OCR BINDINGS
+# ==============================================================================
+winrt-Windows.Media.Ocr
+winrt-Windows.Graphics.Imaging
+winrt-Windows.Storage
+winrt-Windows.Storage.Streams
+
+winrt-Windows.Foundation
+einops

@@ -13,6 +13,7 @@ memory/*.json
 *.log
 character_files/vts_token.txt
 training_logs.jsonl
+ada_system_matrix_runs.jsonl
 
 # Heavy AI Models & Weights
 models/

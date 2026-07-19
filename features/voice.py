@@ -43,10 +43,8 @@ class Voice:
             self.sample_rate = 44100 # Supertonic 3 outputs 44.1kHz natively
 
         vts_id = self._get_device_id(config.VTS_CABLE_DEVICE_NAME)
-        hw_id = self._get_device_id(config.HARDWARE_DEVICE_NAME)
 
         self.vts_stream = None
-        self.hardware_stream = None
 
         try:
             if vts_id is not None:
@@ -58,15 +56,6 @@ class Voice:
         except Exception as e:
             print(f"[Voice] 🛑 VTS Stream blocked by Windows: {e}")
 
-        try:
-            self.hardware_stream = sd.OutputStream(
-                samplerate=self.sample_rate, channels=2, dtype='int16', device=hw_id
-            )
-            self.hardware_stream.start()
-            print(f"[Voice] Hardware Stream bound to: Default/Ears")
-        except Exception as e:
-            print(f"[Voice] 🛑 Hardware Stream failure: {e}")
-
     def _playback_loop(self):
         """Dedicated thread that ONLY handles playing audio, freeing the network loop."""
         while True:
@@ -74,7 +63,7 @@ class Voice:
             if audio_data is None:
                 break
             if not self.stop_event.is_set():
-                self._dual_write(audio_data)
+                self._route_audio(audio_data)
             self.playback_queue.task_done()
 
     def _safe_write(self, stream, data):
@@ -83,7 +72,7 @@ class Voice:
         except Exception:
             pass
 
-    def _dual_write(self, audio_data):
+    def _route_audio(self, audio_data):
         if audio_data.ndim == 1:
             audio_data = audio_data.reshape(-1, 1)
             
@@ -93,8 +82,6 @@ class Voice:
         futures = []
         if getattr(self, 'vts_stream', None) is not None:
             futures.append(self.executor.submit(self._safe_write, self.vts_stream, stereo_data_int16))
-        if getattr(self, 'hardware_stream', None) is not None:
-            futures.append(self.executor.submit(self._safe_write, self.hardware_stream, stereo_data_int16))
             
         if futures:
             concurrent.futures.wait(futures)
@@ -103,12 +90,20 @@ class Voice:
         print("[Voice] 🛑 Interruption: Clearing hardware buffers...")
         self.stop_event.set()
         
-        # Clear the incoming sentence queue
-        while not audio_queue.empty():
+        # 1. Properly drain the incoming sentence queue
+        while True:
             try:
                 audio_queue.get_nowait()
                 audio_queue.task_done()
-            except Exception:
+            except queue.Empty:
+                break
+                
+        # 2. Properly drain the physical playback queue
+        while True:
+            try:
+                self.playback_queue.get_nowait()
+                self.playback_queue.task_done()
+            except queue.Empty:
                 break
         with audio_queue.mutex:
             audio_queue.queue.clear()
@@ -184,9 +179,6 @@ class Voice:
                 "total_steps": int(quality_steps)  # Matches the updated BaseModel
             }
 
-            # --- DEBUGLINE: PRINT EXACT HOST PAYLOAD ---
-            # print(f"\n[Voice Debug] Shipping JSON Payload to Container:\n{json.dumps(payload, indent=2)}")
-
             try:
                 response = self.http_session.post(url, json=payload, stream=True, timeout=None)
                 response.raise_for_status()
@@ -236,9 +228,6 @@ class Voice:
             if hasattr(self, 'vts_stream') and self.vts_stream is not None:
                 self.vts_stream.stop()
                 self.vts_stream.close()
-            if hasattr(self, 'hardware_stream') and self.hardware_stream is not None:
-                self.hardware_stream.stop()
-                self.hardware_stream.close()
             if hasattr(self, 'executor'):
                 self.executor.shutdown(wait=False)
         except Exception:

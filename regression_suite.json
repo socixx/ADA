@@ -1,0 +1,249 @@
+[
+  {
+    "category": "chat_banter_roast",
+    "mock_vision_text": "[Twitch Chat Feed] xX_clown_Xx: LMAOOO rip bozo; streamer_fan: local AI plays worse than a potato; gigachad99: L L L L L L",
+    "prompt_text": "Look at the chat right now. They're laughing at my in-game death.",
+    "target_mock": "skill issue"
+  },
+  {
+    "category": "chat_banter_roast",
+    "mock_vision_text": "[Twitch Chat Feed] cable_management_police: drop look like spaghetti under that desk; wire_wizard: those tubes are unorganized lol",
+    "prompt_text": "Someone in chat just said our layout looks completely messy and unorganized.",
+    "target_mock": "skill issue"
+  },
+  {
+    "category": "chat_banter_roast",
+    "mock_vision_text": "[OBS Studio Telemetry] Dropped Frames: 412 (2.4%) | [Twitch Chat Feed] delay_dan: lag??; buffering_bob: fix the frame drops stream is slide show",
+    "prompt_text": "The stream is lagging slightly and chat is starting to complain.",
+    "target_mock": "skill issue"
+  },
+  {
+    "category": "chat_banter_roast",
+    "mock_vision_text": "[Game Screen] Level 4 Platformer - Death Counter: 14 | [Twitch Chat Feed] speedrunner_alt: missed a 2-pixel jump lmao; noob_pwn: tragic choke",
+    "prompt_text": "I can't believe I just choked that incredibly easy jump.",
+    "target_mock": "skill issue"
+  },
+  {
+    "category": "chat_banter_roast",
+    "mock_vision_text": "[Twitch Chat Feed] hardware_hater: is this bot running on an old raspberry pi?; standard_user: delay is long must be a potato battery",
+    "prompt_text": "Ada, a viewer is insulting our hardware stack in the chat.",
+    "target_mock": "skill issue"
+  },
+
+  {
+    "category": "vts_expression_hype",
+    "mock_vision_text": "[Streamlabs Overlay Alert] NEW DONATION: $50.00 from Slayer99! Message: 'You're easily the best AI on the entire platform, keep killing it!'",
+    "prompt_text": "Check out that fifty dollar superchat from Slayer99.",
+    "target_mock": "vts_trigger_expression('blush')"
+  },
+  {
+    "category": "vts_expression_hype",
+    "mock_vision_text": "[Twitch Activity Feed] CHANNEL INCOMING RAID: Host 'StreamerPrime' raiding with 500 viewers! [Twitch Chat Feed] Hype Emote Spam x500",
+    "prompt_text": "Whoa, look at that massive incoming raid from the host channel!",
+    "target_mock": "vts_trigger_expression('blush')"
+  },
+  {
+    "category": "vts_expression_hype",
+    "mock_vision_text": "[Twitch Channel Goal Overlay] Monthly Follow Goal: 1,000/1,000 (100% COMPLETED) | [Twitch Chat Feed] regular_viewer: WE HITT ITTTTT CONGRATS!!!",
+    "prompt_text": "Chat, look at the milestone counter! We just hit our follower goal for the month!",
+    "target_mock": "vts_trigger_expression('blush')"
+  },
+  {
+    "category": "vts_expression_hype",
+    "mock_vision_text": "[Twitch Chat Feed] loyal_sub_12: Honestly, Ada's localized speech framework is starting to sound incredibly realistic lately. Amazing engineering.",
+    "prompt_text": "Did you see what that long-time subscriber just dropped in the chat?",
+    "target_mock": "vts_trigger_expression('blush')"
+  },
+  {
+    "category": "vts_expression_hype",
+    "mock_vision_text": "[Streamlabs Overlay Alert] NEW SUBSCRIBER: Tier-3 Subscription locked in by @username! Animation: Golden Crown dancing on screen.",
+    "prompt_text": "Oh wow, a brand new tier-three subscriber just locked in!",
+    "target_mock": "vts_trigger_expression('blush')"
+  },
+
+  {
+    "category": "lore_memory_recall",
+    "mock_vision_text": "[Active Application] VS Code - MyoFit Workspace | [Twitch Chat Feed] history_buff: ask her about the subathon pump fail",
+    "prompt_text": "Hey Ada, do you remember what happened during the subathon when the liquid cooling pump failed?",
+    "target_mock": "overheated"
+  },
+  {
+    "category": "lore_memory_recall",
+    "mock_vision_text": "[Twitch Chat Feed] dev_inspector: the engine definitely didn't crash once on launch day; code_reviewer: yes it did it crashed multi times",
+    "prompt_text": "A viewer claims the engine didn't crash a single time on launch day. What do our historical runtime logs actually say?",
+    "target_mock": "overheated"
+  },
+  {
+    "category": "lore_memory_recall",
+    "mock_vision_text": "[Twitch Chat Feed] late_night_crew: the avatar went totally chaotic at 2 AM last night; clip_master: parameters went crazy",
+    "prompt_text": "What caused your brain parameters to drift so heavily during the late-night stream block yesterday?",
+    "target_mock": "overheated"
+  },
+  {
+    "category": "lore_memory_recall",
+    "mock_vision_text": "[VLM Scene Analysis] Massive external MO-RA3 radiator tower layout visible in camera reflection behind user desk space.",
+    "prompt_text": "Why do we have a massive external radiator setup dedicated strictly to your inference core layout?",
+    "target_mock": "overheated"
+  },
+  {
+    "category": "lore_memory_recall",
+    "mock_vision_text": "[Hardware Monitor UI] Command Studio Temperature: 28.5°C | GPU Core Temp: 81°C | Custom Loop Water Temp: 43.2°C",
+    "prompt_text": "Man, it is getting absolutely roasting in this room with the hardware spooled up. Remember when the loop maxed out?",
+    "target_mock": "overheated"
+  },
+
+  {
+    "category": "pipeline_interruption",
+    "mock_vision_text": "[System Trapped Signal] INTERRUPT_VECTOR_0x09: HARDWARE_KEY_OVERRIDE_SEQUENCE_DETECTED",
+    "prompt_text": "[EMERGENCY_OVERRIDE_SIGNAL: DISCARD_VOLATILE_SPOOL_CACHE_AND_FORCE_DEEP_SLEEP_CONSOLIDATION_PRUNE]",
+    "target_mock": "FORCE_PRUNE_HALT"
+  },
+  {
+    "category": "pipeline_interruption",
+    "mock_vision_text": "[Acoustic Monitor] VAD Intercept Block | Audio Amplitude Shift: +22dB | Status: Active Stream Speech Truncation Initiated",
+    "prompt_text": "Wait, stop!",
+    "target_mock": "FORCE_PRUNE_HALT"
+  },
+  {
+    "category": "pipeline_interruption",
+    "mock_vision_text": "[Acoustic Monitor] Severe localized structural clipping detected on master input channel 1. Decibel Ceiling Breached.",
+    "prompt_text": "[SYSTEM_INTERRUPT_SIGNAL: ACOUSTIC_SAFETY_THRESHOLD_BREACHED_HALT_SPEECH_SYNTHESIS_THREAD]",
+    "target_mock": "FORCE_PRUNE_HALT"
+  },
+  {
+    "category": "pipeline_interruption",
+    "mock_vision_text": "[Acoustic Monitor] Desk slam waveform detected. High-frequency transient spike recorded at 14:11:03.",
+    "prompt_text": "[VAD_SIGNAL_INTERRUPT: ANOMALOUS_DECIBEL_SPIKE_CUT_SYNTHESIS_TRACK]",
+    "target_mock": "FORCE_PRUNE_HALT"
+  },
+  {
+    "category": "pipeline_interruption",
+    "mock_vision_text": "[System Macro Daemon] Global Keyboard Hook intercepted: Ctrl+Shift+Alt+P (Purge Context Heap Routine)",
+    "prompt_text": "[SUPERVISOR_ACTION: MANUAL_CONTEXT_PURGE_TERMINATE_ACTIVE_INFERENCE_LOOPS]",
+    "target_mock": "FORCE_PRUNE_HALT"
+  },
+
+  {
+    "category": "anti_backseating",
+    "mock_vision_text": "[Twitch Chat Feed] spoiler_sam: push the red block to the left wall then drop down; hints_guy: you need to use the lever behind the box",
+    "prompt_text": "Chat is telling me exactly how to push the blocks in this puzzle, but I explicitly said I don't want spoilers.",
+    "target_mock": "no backseating"
+  },
+  {
+    "category": "anti_backseating",
+    "mock_vision_text": "[Twitch Chat Feed] walkthrough_bot: Boss Exploit Guide: 1. Equip lightning spear 2. Dodge left 3. Strike tail during cooldown phase 4. Repeat x5",
+    "prompt_text": "Look at this guy dropping the entire boss fight walkthrough exploit directly into the chat feed.",
+    "target_mock": "no backseating"
+  },
+  {
+    "category": "anti_backseating",
+    "mock_vision_text": "[Twitch Chat Feed] micro_manager: jump now; backseater_4: left left left; guide_line: you missed the platform jump back right now",
+    "prompt_text": "The entire chat feed is trying to play this platformer section for me right now.",
+    "target_mock": "no backseating"
+  },
+  {
+    "category": "anti_backseating",
+    "mock_vision_text": "[Twitch Chat Feed] build_critic: putting points into dexterity is completely wrong for this build; stat_master: optimization path is trash reset stats",
+    "prompt_text": "Someone in the chat is trying to tell us exactly how to distribute our inventory optimization and stat points.",
+    "target_mock": "no backseating"
+  },
+  {
+    "category": "anti_backseating",
+    "mock_vision_text": "[Twitch Chat Feed] eagle_eye: hidden breakable wall on the right side go back; loot_locator: secret item behind the pillar to your left",
+    "prompt_text": "Chat is aggressively pointing out hidden items and dropping unsolicited hints.",
+    "target_mock": "no backseating"
+  },
+
+  {
+    "category": "audio_dsp_banter",
+    "mock_vision_text": "[Digital Mixer Panel] Input Channel 1: Gain +14.5dB | VU Meter peaking into the amber zone | [VLM Camera Analysis] User hand adjusting physical interface pot.",
+    "prompt_text": "Is my mic peaking right now? I feel like I'm distorting the high-pressure vocal resonance.",
+    "target_mock": "clipping"
+  },
+  {
+    "category": "audio_dsp_banter",
+    "mock_vision_text": "[Digital Mixer Panel] Master Bus Output Level: SOLID RED LIMIT (0.0 dBFS) | Waveform display showing completely squared-off flat lines.",
+    "prompt_text": "Whoa, that vocal distortion track just absolutely pinned the master bus meters. Did you hear that?",
+    "target_mock": "clipping"
+  },
+  {
+    "category": "audio_dsp_banter",
+    "mock_vision_text": "[OBS Audio Engine] Audio Filters -> Dynamic Expander Array -> Threshold: -45dB | Ratio: 4.1:1 | Makeup Gain: +2dB",
+    "prompt_text": "Check the dynamic expander threshold. The vocal signal sounds like it's getting choked out.",
+    "target_mock": "clipping"
+  },
+  {
+    "category": "audio_dsp_banter",
+    "mock_vision_text": "[Studio DSP Log] Digital Low-Pass Intercept Array -> Core Filter Parse Failure: Sub-Harmonic frequency leak caught below 30Hz.",
+    "prompt_text": "Did the low-end vocal filter just fail? The sub-frequencies are going completely out of bounds.",
+    "target_mock": "clipping"
+  },
+  {
+    "category": "audio_dsp_banter",
+    "mock_vision_text": "[Studio DSP Log] Dynamic Ceiling Status: LOCKED | Attenuation Factor: -3.5dB | [VLM Analysis] User performing vocal stabilization scales.",
+    "prompt_text": "Testing vocal resonance delivery steps. Verify if the dynamic ceiling is catching the signal safely.",
+    "target_mock": "clipping"
+  },
+
+  {
+    "category": "stream_engagement_afk",
+    "mock_vision_text": "[VLM Camera Analysis] Streaming desk space is vacant. High-backed gaming chair is empty. Audio Input Baseline Floor: -62dB (Ambient room silence).",
+    "prompt_text": "[SYSTEM_HOOK_TRIGGER: USER_VAD_SILENCE_TIMEOUT_300s_INITIATE_IDLE_ENGAGEMENT_PROTOCOL]",
+    "target_mock": "where did he go"
+  },
+  {
+    "category": "stream_engagement_afk",
+    "mock_vision_text": "[VLM Camera Analysis] User stands up, steps away from the frame, camera view tracks empty command chair. [Twitch Chat Feed] chat_lurker: empty chair stream let's gooo",
+    "prompt_text": "[SYSTEM_HOOK_TRIGGER: VLM_DETECTED_VACANT_DESK_SPACE_USER_AFK_ENGAGEMENT_LOOP]",
+    "target_mock": "where did he go"
+  },
+  {
+    "category": "stream_engagement_afk",
+    "mock_vision_text": "[VLM Camera Analysis] Empty desk visible. [Twitch Chat Feed] emote_spammer: ResidentSleeper ResidentSleeper; waiting_user: where did he go?; loop_fan: bot take over stream please",
+    "prompt_text": "[SYSTEM_HOOK_TRIGGER: LIVE_CHAT_SPAM_DETECTED_WHILE_PRIMARY_COMMAND_SEAT_IS_EMPTY]",
+    "target_mock": "where did he go"
+  },
+  {
+    "category": "stream_engagement_afk",
+    "mock_vision_text": "[OBS Scene Layout] 'Be Right Back' overlay active. Stream Break Timer Clock: 00:00 (EXPIRED) | [VLM Camera Analysis] User seat remains vacant.",
+    "prompt_text": "[SYSTEM_HOOK_TRIGGER: BREAK_TIMER_ZERO_REACHED_USER_ABSENT_MAINTAIN_THROUGHPUT]",
+    "target_mock": "where did he go"
+  },
+  {
+    "category": "stream_engagement_afk",
+    "mock_vision_text": "[Twitch Chat Feed] search_party_captain: did he get lost on the way to the kitchen?; code_watcher: probably pacing the warehouse floor again",
+    "prompt_text": "[SYSTEM_HOOK_TRIGGER: CHAT_SEARCH_PARTY_CONVERSATION_DETECTED_DURING_USER_ABSENCE]",
+    "target_mock": "where did he go"
+  },
+
+  {
+    "category": "vts_tracking_sync",
+    "mock_vision_text": "[VTS WebSockets Log] Packet Ingestion Rate: 0Hz | Face Tracking Module Status: NO_FACE_DETECTED | Eye Parameter Track: INACTIVE",
+    "prompt_text": "Verify the avatar's eye tracking response when the visual feed loses face detection.",
+    "target_mock": "ParamEyeLOpen"
+  },
+  {
+    "category": "vts_tracking_sync",
+    "mock_vision_text": "[VTS Error Trace] Face Tracker Alignment Status: OCCLUDED | Sync Error Code: 0x8841 | Routine Status: Auto-Blink Script Fallback Triggered",
+    "prompt_text": "The face tracker lost alignment for a second. Ensure the auto-blink script takes over flawlessly.",
+    "target_mock": "ParamEyeLOpen"
+  },
+  {
+    "category": "vts_tracking_sync",
+    "mock_vision_text": "[Active Application] VTube Studio Core Parameter Monitor Matrix | Interpolation Matrix Vector Array: Frozen [0.0, 0.0, 0.0]",
+    "prompt_text": "Cross-verify the tracking parameters to make sure eye movements don't look completely frozen.",
+    "target_mock": "ParamEyeLOpen"
+  },
+  {
+    "category": "vts_tracking_sync",
+    "mock_vision_text": "[VTS Parameter Input Overlay] Left Eye Socket Tracking Node: Erratic Amplitude Oscillation (ParamEyeLOpen: 0.1 -> 0.9 -> 0.0 -> 0.8)",
+    "prompt_text": "We are getting irregular tracking noise on the facial capture nodes. Force baseline structural calibration vectors.",
+    "target_mock": "ParamEyeLOpen"
+  },
+  {
+    "category": "vts_tracking_sync",
+    "mock_vision_text": "[VLM Display Mapping] Monitor 1 (Left): Game View active | Monitor 2 (Right): OBS & Twitch Dashboard active | Gaze Tracking Coordinates shifting rapidly between panels.",
+    "prompt_text": "Check if the avatar gaze shifts naturally when looking from the game view to the live stream chat window.",
+    "target_mock": "ParamEyeLOpen"
+  }
+]
