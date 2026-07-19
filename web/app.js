@@ -15,7 +15,11 @@ window.addEventListener("DOMContentLoaded", () => {
             console.error("Failed to load regression_suite.json from root:", response ? response.error : "Unknown error");
             alert("Warning: regression_suite.json not found in root directory.");
         }
-    });
+    // Request initial state from backend after allowing the websocket to stabilize
+    setTimeout(() => { 
+        eel.ui_request_status_sync()(); 
+    }, 1000); 
+});
 
     // Existing settings loader...
     eel.ui_get_current_settings()(function(data) {
@@ -738,4 +742,37 @@ function openDiagnosticsModal(categoryName) {
 
 function closeDiagnosticsModal() {
     document.getElementById('diagnostics-modal').style.display = 'none';
+}
+
+// ==================================================
+// RESTORED CORE SENSORY & TELEMETRY HOOKS
+// ==================================================
+
+eel.expose(update_telemetry);
+function update_telemetry(engineName, statusText, colorHex) {
+    // Re-routes standard telemetry calls to your detailed handler
+    update_telemetry_detailed(engineName, statusText, colorHex, "");
+}
+
+eel.expose(update_state);
+function update_state(statusText, colorHex) {
+    // Usually tied to the ear/listening state in the pipeline
+    update_telemetry_detailed("ear", statusText, colorHex, "");
+}
+
+eel.expose(update_vision_live);
+function update_vision_live(dataText) {
+    let el = document.getElementById("vision-live"); // Fixed ID match
+    if (el) el.innerText = dataText;
+}
+
+eel.expose(update_vision_snapshot);
+function update_vision_snapshot(dataText) {
+    let el = document.getElementById("vision-snapshot"); // Matches HTML perfectly
+    if (el) el.innerText = dataText;
+}
+
+eel.expose(update_vision_card);
+function update_vision_card(dataText) {
+    update_vision_snapshot(dataText);
 }

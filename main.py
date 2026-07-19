@@ -50,6 +50,16 @@ vision_scribe_node = None
 # EEL UI EXPOSED FUNCTIONS (Bridge to JS)
 # ==========================================
 @eel.expose
+def ui_request_status_sync():
+    """Forces an initial state broadcast once the UI connects to the socket."""
+    try:
+        eel.update_telemetry_detailed("tts", "Idle", "#64748b", "")
+        eel.update_telemetry("ear", "Listening...", "#a6e3a1")
+        eel.update_telemetry_detailed("llm", "Idle", "#64748b", "")
+    except Exception as e:
+        print(f"[UI Sync] Socket not ready: {e}")
+
+@eel.expose
 def ui_interrupt_ada():
     brain_node.abort_event.set()
     voice_node.stop_with_fade(audio_queue)
