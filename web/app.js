@@ -862,3 +862,107 @@ eel.expose(update_vision_card);
 function update_vision_card(dataText) {
     update_vision_snapshot(dataText);
 }
+
+// ==========================================
+// BROWSER NODE PIPELINE
+// ==========================================
+
+// 1. Receives the base64 screenshot from Python and updates the <img> tag
+eel.expose(update_browser_viewport);
+function update_browser_viewport(b64_string) {
+    const imgElement = document.getElementById('browser-viewport');
+    const statusElement = document.getElementById('browser-status-indicator');
+    
+    if (imgElement) {
+        imgElement.src = "data:image/jpeg;base64," + b64_string;
+    }
+    if (statusElement && statusElement.innerText === "Offline") {
+        statusElement.innerText = "Live Stream Active";
+        statusElement.style.color = "#10b981"; // accent-green
+    }
+}
+
+// 2. Python calls this whenever the URL changes to trigger a UI refresh
+eel.expose(trigger_history_sync);
+function trigger_history_sync() {
+    eel.ui_fetch_browser_history()(renderBrowserHistory);
+}
+
+// 3. Renders the SQLite data into the ledger column
+function renderBrowserHistory(historyArray) {
+    const listContainer = document.getElementById('browser-history-list');
+    if (!listContainer) return;
+
+    if (!historyArray || historyArray.length === 0) {
+        listContainer.innerHTML = "No history recorded yet.";
+        return;
+    }
+
+    listContainer.innerHTML = ""; // Clear existing
+
+    historyArray.forEach(entry => {
+        // Convert the unix timestamp to a readable time format
+        const dateObj = new Date(entry.timestamp * 1000);
+        const timeString = dateObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+
+        const itemDiv = document.createElement('div');
+        itemDiv.style.cssText = "display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px dashed rgba(36, 41, 66, 0.4);";
+        
+        itemDiv.innerHTML = `
+            <div style="color: #cbd5e1; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${entry.title}</div>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="color: #3b82f6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 75%;">${entry.url}</span>
+                <span style="color: #64748b; font-size: 0.85em;">${timeString}</span>
+            </div>
+        `;
+        
+        listContainer.appendChild(itemDiv);
+    });
+}
+
+// Fetch history on initial load just in case the node is already running
+window.addEventListener('DOMContentLoaded', (event) => {
+    trigger_history_sync();
+});
+
+eel.expose(show_skill_indicator);
+function show_skill_indicator(skillName) {
+    const chatContainer = document.getElementById('chat-box'); 
+    if (!chatContainer) return;
+    
+    const indicatorDiv = document.createElement('div');
+    indicatorDiv.style.borderLeft = "2px solid #3b82f6";
+    indicatorDiv.style.backgroundColor = "rgba(59, 130, 246, 0.1)";
+    indicatorDiv.style.padding = "8px 12px";
+    indicatorDiv.style.margin = "8px 0";
+    indicatorDiv.style.fontFamily = "monospace";
+    indicatorDiv.style.fontSize = "12px";
+    indicatorDiv.style.color = "#93c5fd";
+    indicatorDiv.style.textTransform = "uppercase";
+    indicatorDiv.style.letterSpacing = "0.05em";
+    
+    indicatorDiv.innerText = `[SYSTEM]: Initiating ${skillName} sequence...`;
+    
+    chatContainer.appendChild(indicatorDiv);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+eel.expose(update_web_node_query);
+function update_web_node_query(query) {
+    const ledgerContainer = document.getElementById('browser-history-list'); 
+    if (!ledgerContainer) return;
+    
+    if (ledgerContainer.innerText.includes("No history recorded yet.")) {
+        ledgerContainer.innerHTML = "";
+    }
+    
+    const queryLog = document.createElement('div');
+    queryLog.style.padding = "8px 0";
+    queryLog.style.borderBottom = "1px solid rgba(255, 255, 255, 0.1)";
+    queryLog.style.fontSize = "13px";
+    queryLog.style.color = "#e2e8f0";
+    
+    queryLog.innerHTML = `<span style="color: #a78bfa; font-weight: bold; margin-right: 8px;">QUERY ></span> ${query}`;
+    
+    ledgerContainer.prepend(queryLog);
+}

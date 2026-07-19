@@ -189,6 +189,7 @@
         <div class="nav-item" onclick="switchTab('memory')">Memory</div>
         <div class="nav-item" onclick="switchTab('transcript')">Transcript</div>
         <div class="nav-item" onclick="switchTab('benchmark')">System Benchmarking</div>
+        <div class="nav-item" onclick="switchTab('browser')">Web Node</div>
         <div class="nav-item" onclick="switchTab('vts')">VTube Studio</div>
     </div>
 
@@ -318,6 +319,35 @@
                             Awaiting performance metrics loop execution to dump telemetry dashboard.
                         </div>
                     </div>
+                </div>
+            </div>
+
+            <!-- BROWSER LIVE FEED TAB -->
+            <div id="tab-browser" class="tab-content">
+                <div style="display: flex; gap: 20px; height: 100%;">
+                    
+                    <!-- Viewport (Left Side - 70%) -->
+                    <div style="display: flex; flex-direction: column; flex: 7; background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden;">
+                        <div style="background: #181b2a; padding: 12px 18px; font-size: 0.8em; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: var(--accent-blue); border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center;">
+                            <span>Active Render Surface</span>
+                            <span style="color: #64748b;" id="browser-status-indicator">Offline</span>
+                        </div>
+                        <div style="flex-grow: 1; background: #000; position: relative;">
+                            <img id="browser-viewport" src="" style="width: 100%; height: 100%; object-fit: contain; position: absolute; top: 0; left: 0;" alt="">
+                        </div>
+                    </div>
+
+                    <!-- History Ledger (Right Side - 30%) -->
+                    <div style="display: flex; flex-direction: column; flex: 3; background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 8px; padding: 20px; box-sizing: border-box;">
+                        <h3 style="margin-top: 0; color: var(--accent-purple); border-bottom: 1px solid var(--border-color); padding-bottom: 10px; font-size: 0.9em; text-transform: uppercase; letter-spacing: 1px;">Session Ledger</h3>
+                        
+                        <div id="browser-history-list" style="overflow-y: auto; flex-grow: 1; font-family: monospace; font-size: 0.85em; display: flex; flex-direction: column; gap: 12px; color: var(--text-muted);">
+                            Awaiting navigation events...
+                        </div>
+                        
+                        <button class="btn" style="margin-top: 15px;" onclick="eel.ui_trigger_browser_activation()()">Force Wake Browser</button>
+                    </div>
+
                 </div>
             </div>
 

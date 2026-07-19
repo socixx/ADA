@@ -10,6 +10,7 @@ faster-whisper
 openai
 psutil
 
+playwright
 eel
 fastapi
 uvicorn

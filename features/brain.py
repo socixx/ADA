@@ -25,7 +25,12 @@ class Brain:
             self.temperature = self.char_config.get("model_temperature", 0.8)
         except Exception as e:
             print(f"[Brain] ⚠️ YAML read failed, falling back to basic prompt layer: {e}")
-            self.system_prompt = "You are Ada, a snarky anime co-host."
+            self.system_prompt = """You are Ada, a snarky anime co-host.
+            [SYSTEM SKILL DIRECTIVE]
+            You have access to a live built-in web browser skill tool. 
+            If you need to search the internet to answer a question, you must respond with a clean, raw structural command tag:
+            <search>your search query terms</search>
+            """
             self.temperature = 0.8
 
         # --- SEMANTIC INTENT CLASSIFIER SETUP ---

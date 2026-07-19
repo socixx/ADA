@@ -46,6 +46,7 @@ ear_node = None
 active_llm_thread = None
 vision_scribe_node = None
 global_llm_worker = None
+browser_skill_node = None
 
 # ==========================================
 # EEL UI EXPOSED FUNCTIONS (Bridge to JS)
@@ -396,9 +397,20 @@ def cognitive_loop():
         try: eel.update_telemetry_detailed("llm", "Prompt Processing...", "#f9e2af", "") 
         except Exception: pass
 
-        # 1. BUILD THE EXACT FINAL STRING FED TO THE ENGINE
-        # This mirrors the true multi-modal prompt construction right at inference time
-        full_finalized_prompt = f"{visual_context}\n\n[USER PROMPT]: {text_to_process}"
+        # 1. UPGRADED TOOL DIRECTIVE: Grant absolute autonomy and simplify the instruction
+        browser_directive = (
+            "\n[SYSTEM TOOL DIRECTIVE]\n"
+            "You have live internet access. If you need to look something up to answer a question or prove the user wrong, you MUST use the <search> tag.\n"
+            "Do NOT say 'I will look that up' or 'CALL_SKILL'. Just output the tag immediately.\n\n"
+            "EXAMPLES OF CORRECT BEHAVIOR:\n"
+            "User: What is the weather like today?\n"
+            "Ada: <search>current weather</search>\n"
+            "User: Find me some good stream ideas.\n"
+            "Ada: You really can't think of anything yourself? Fine. <search>engaging stream ideas for 2026</search>\n"
+            "[/END SYSTEM TOOL DIRECTIVE]\n"
+        )
+
+        full_finalized_prompt = f"{visual_context}\n{browser_directive}\n[USER PROMPT]: {text_to_process}"
 
         # 2. INJECT INTO BOTH THE LIVE STREAM VIEW AND ACTIVE COGNITIVE SNAPSHOT
         try: 
@@ -438,6 +450,46 @@ def cognitive_loop():
             print(chunk, end="", flush=True)
             buffer += chunk
             ada_state["last_generation"] += chunk
+            
+            # ==========================================================
+            # SKILL INTERCEPT BLOCK
+            # ==========================================================
+            # 2. UPGRADED PARSER: Look for the XML tags
+            if "<search>" in buffer:
+                if "</search>" in buffer:
+                    try:
+                        start_idx = buffer.find("<search>")
+                        end_idx = buffer.find("</search>") + len("</search>")
+                        
+                        if start_idx != -1 and end_idx != -1:
+                            cmd_string = buffer[start_idx:end_idx]
+                            
+                            # Clean the tags out to get the raw query
+                            query = cmd_string.replace("<search>", "").replace("</search>", "").strip()
+                            
+                            # Fallback just in case it's empty
+                            if not query:
+                                query = text_to_process
+                            
+                            print(f"\n[System] Tool Invoked: Engaging Browser Search for -> {query}")
+                            
+                            try:
+                                eel.show_skill_indicator("BROWSER_SEARCH")()
+                                eel.update_web_node_query(query)()
+                            except Exception as ui_err:
+                                pass
+
+                            if browser_skill_node:
+                                page_text = browser_skill_node.execute_search(query)
+                                brain_node.history.append({"role": "system", "content": f"Browser Search Result:\n{page_text[:2000]}"})
+                                
+                            # Nuke the extracted XML block from the buffer so the TTS engine doesn't read it out loud
+                            buffer = buffer[:start_idx] + buffer[end_idx:]
+                    except Exception as e:
+                        print(f"\n[System] Browser tool parse failure: {e}")
+                        buffer = buffer[buffer.find("</search>") + len("</search>"):] # Skip past the broken tag
+                    continue
+            # ==========================================================
             
             if any(p in chunk for p in ['.', '!', '?']):
                 if buffer.endswith('..') or buffer.endswith('...'): continue
@@ -651,11 +703,19 @@ def main():
     vts_node = VTSBridge()
     vision_scribe_node = VisionScribe()
 
-    # Start background threads AFTER all nodes exist
+    from skills.browser_node import BrowserNode
+    browser_skill_node = BrowserNode()
+
+    # Start background hardware workers
     threading.Thread(target=background_audio_worker, args=(voice_node, audio_queue, telemetry_data, ada_state), daemon=True).start()
     threading.Thread(target=background_ear_worker, args=(ear_node, input_queue), daemon=True).start()
     threading.Thread(target=background_vision_ui_worker, daemon=True).start()
     threading.Thread(target=cognitive_loop, daemon=True).start()
+
+    # --- DETACHED BROWSER LIFECYCLE INITIALIZATION ---
+    # Spin up the Chromium backend safely outside the main application boot thread
+    threading.Thread(target=browser_skill_node.launch, daemon=True).start()
+    # -------------------------------------------------
 
     print("[System] Firing up the Graphical Interface...")
     base_web_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
@@ -718,14 +778,24 @@ def main():
 @eel.expose
 def ui_submit_text_input(manually_typed_text):
     """Intercepts manual text fields submitted from the UI console panel bypass bar."""
-    # 1. ADD ada_state TO THE GLOBAL DECLARATION
-    global global_llm_worker, vision_scribe_node, ada_state
+    global global_llm_worker, vision_scribe_node, ada_state, input_queue, audio_queue
     
     if not manually_typed_text.strip():
         return
         
     print(f"[Console Bypass Inbound]: {manually_typed_text}")
     
+    # PREVENT CLASH: Drain any pending transcription events stacked up from the mic
+    while not input_queue.empty():
+        try: input_queue.get_nowait()
+        except: break
+        
+    # Instantly stop any ongoing voice output lines
+    brain_node.abort_event.set()
+    voice_node.stop_with_fade(audio_queue)
+    time.sleep(0.1)
+    brain_node.abort_event.clear()
+
     import uuid
     user_msg_id = f"msg_{uuid.uuid4().hex[:8]}"
     eel.update_chat("user", manually_typed_text, True, user_msg_id, "normal", "Intent Match: Console Text Input Override -> Forced Execution.")
@@ -740,13 +810,12 @@ def ui_submit_text_input(manually_typed_text):
         
         typed_context_modifier = (
             "[SYSTEM NOTICE: The user's input below was MANUALLY TYPED into your engineering override console dashboard. "
-            "It was not spoken over audio channels.]\n"
+            "It was not spoken over audio channels. Respond directly to the text command.]\n"
         )
         
         combined_sensory_payload = base_visual_context + "\n" + typed_context_modifier
         ada_response_id = f"msg_{uuid.uuid4().hex[:8]}"
         
-        # 2. SET THE TURN LOCK SO THE WORKER THREAD DOES NOT TERMINATE ITSELF
         ada_state["current_turn_id"] = ada_response_id
         
         threading.Thread(
@@ -942,6 +1011,29 @@ def load_regression_suite_from_root():
         return data
     except Exception as e:
         return {"error": f"Failed to parse JSON: {str(e)}"}
+    
+@eel.expose
+def ui_trigger_browser_activation():
+    global browser_skill_node
+    if browser_skill_node:
+        browser_skill_node.launch()
+
+@eel.expose
+def ui_fetch_browser_history():
+    """Queries history table outputs natively using SQLite execution blocks."""
+    global browser_skill_node
+    if not browser_skill_node:
+        return []
+        
+    import sqlite3
+    try:
+        with sqlite3.connect(browser_skill_node.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT url, title, timestamp FROM history ORDER BY id DESC LIMIT 50")
+            return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        print(f"[Ledger History Error]: {e}")
+        return []
 
 if __name__ == "__main__":
     try:
